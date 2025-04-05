@@ -1,6 +1,6 @@
 #!/bin/bash
 
-DATASETS_DIR="utils/datasets"
+DATASETS_DIR="datasets"
 mkdir -p $DATASETS_DIR
 
 cd $DATASETS_DIR

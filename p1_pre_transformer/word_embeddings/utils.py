@@ -23,6 +23,8 @@ def save_checkpoint(model, epoch, loss, lr, batch_size):
         'loss': loss
     }
     lr = str(lr).replace('.', '_')
+    if 'weights' not in os.listdir():
+        os.mkdir('weights')
     if lr not in os.listdir('weights'):
         os.mkdir('weights/{}'.format(lr))
     torch.save(d, 'weights/{}/word2vec_bs_{}{}_epoch{}{}.pt'.format(lr, " " * (2 - len(str(batch_size))), batch_size, " " * (3 - len(str(epoch))), epoch))

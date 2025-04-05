@@ -3,12 +3,13 @@ import torch
 import numpy as np
 
 class SkipGram(nn.Module):
-    def __init__(self, emb_size = 300, vocab_size = -1, neg_sample = None, freq = None):
+    def __init__(self, emb_size = 300, vocab_size = -1, neg_sample = None, freq = None, device = 'cpu'):
         super(SkipGram, self).__init__()
         self.embs_center = nn.Embedding(vocab_size, emb_size)
         self.embs_context = nn.Embedding(vocab_size, emb_size) 
         self.vocab_size = vocab_size
         self.neg_sample = neg_sample
+        self.device = device
         if neg_sample:
             self.all_indices = np.arange(vocab_size)
             # TODO: modify frequences
@@ -30,7 +31,7 @@ class SkipGram(nn.Module):
             for i in range(B):
                 # print("<><><>", self.all_indices.shape, self.sample_prob.shape)
                 indices = torch.from_numpy(np.random.choice(self.all_indices, size=self.neg_sample, replace=False, p=self.sample_prob))
-                # print("indices in for loop: ", indices.shape)
+                indices = indices.to(self.device)
                 subsets_neg.append(self.embs_context(indices))
             embs_negatives = torch.stack(subsets_neg, dim = 0) # B x K x D
             # print('negatives ids shape: ', embs_negatives.shape)

@@ -13,7 +13,7 @@ class StanfordSentiment(Dataset):
     def __init__(
             self, context = 5, path='datasets/stanfordSentimentTreebank', repeat = 30
     ):
-        # TODO: discard rare tokens
+        # TODO: discard rare tokens, experiment with uploading all data to GPU
         self.context = context
         self.path = path
         self.repeat = repeat
