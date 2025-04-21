@@ -10,6 +10,10 @@ import requests
 from multiprocessing import Pool
 from threading import Thread
 import pickle
+# from pympler import asizeof
+import gc
+import sqlite3
+from fast_counter import CoocCounter
 
 class WikiCorpusBuilder:
     def __init__(self, xml_path, spacy_model = "en_core_web_sm", min_tokens = 11):
@@ -77,7 +81,7 @@ class WikiCorpusBuilder:
     def _save_chunk(self, buffer, out_dir, chunk_id):
         out_path = os.path.join(out_dir, f"chunk_{chunk_id}.pkl")
         with open(out_path, "wb") as f:
-            pickle.dump(buffer, f)
+            pickle.dump(buffer, f, protocol=pickle.HIGHEST_PROTOCOL)
         with open("log.txt", "a") as f:
             print(f"✅ Saved {" " * (2 - len(str(chunk_id)))}{out_path} with {len(buffer)} articles", file = f)
 
@@ -153,7 +157,7 @@ class WikiCorpusBuilder:
         }
         out_path = os.path.join(tokens_chunk_dir, "vocab_details.pkl")
         with open(out_path, "wb") as f:
-            pickle.dump(to_save, f)
+            pickle.dump(to_save, f, protocol=pickle.HIGHEST_PROTOCOL)
         save_end = perf_counter()
         total_time = perf_counter() - time_start
         with open("log.txt", "a") as f:
@@ -173,9 +177,138 @@ class WikiCorpusBuilder:
         id_to_token = data["id_to_token"]
         freqs = data["freqs"]
         return vocab, id_to_token, freqs
+
+    def build_co_oc_matrix_sqlite(self, files_path, window_size = 5, window_type = "symmetric", importance = True, batch_size = 10_000_000, group_by_size = 1_000_000_000):
+        assert window_type in {"symmetric", "left", "right"}, f"❌ Invalid window_type: {window_type}"
+        with open("log.txt", "a") as f:
+            print(f"\n\n[{datetime.now().strftime('%H:%M:%S')}] 🧱 Building co-occurrence matrix with window={window_size} | Batching to SQLite {batch_size} rows | Grouping every {group_by_size} rows", file = f)
+
+        # Step 1: Load Vocab and Frequencies
+        vocab, _, _ = self.load_vocab_and_freqs(files_path)
+
+        # Step 2: Initialize SQLite
+        db_path = db_path = os.path.join(files_path, "cooc_matrix.db")
+        conn, cursor = self._init_sqlite(db_path)
+
+        # Step 3: Iterate over chunks
+        co_oc_start = perf_counter()
+        total_articles = 0
+        total_rows = 0
+        grouped_by = 1
+        X =  CoocCounter()
+        file_list = [f for f in os.listdir(files_path) if f.endswith(".pkl") and f.startswith("chunk_")] # each chunk contains 10K articles
+        for file_idx, file_name in enumerate(sorted(file_list)):
+            chunk_start = perf_counter()
+            with open(os.path.join(files_path, file_name), "rb") as f:
+                data = pickle.load(f)
+
+            for _, tokens in data:
+                token_ids = [vocab[t] for t in tokens if t in vocab] # NOTE: we are actually moving distances but not significantly
+                for center_idx, center_id in enumerate(token_ids):
+                    for distance in range(1, window_size + 1):
+                        weight = 1.0 / distance if importance else 1.0
+                        if window_type != "right" and center_idx - distance >= 0:
+                            context_id = token_ids[center_idx - distance]
+                            # X[(center_id, context_id)] += weight
+                            X.update(center_id, context_id, weight)
+                        if window_type != "left" and center_idx + distance < len(token_ids):
+                            context_id = token_ids[center_idx + distance]
+                            # X[(center_id, context_id)] += weight
+                            X.update(center_id, context_id, weight)
+                total_articles += 1
+
+                if len(X) >= batch_size:
+                    total_rows += len(X)
+                    rows = [(i_id, j_id, val) for (i_id, j_id), val in X.items()]
+                    t_batch = perf_counter()
+                    self._write_to_sqlite(rows, batch_size, conn, cursor)
+                    t_batch = perf_counter() - t_batch
+                    # with open("log.txt", "a") as f: 
+                    #     print(f"[{datetime.now().strftime('%H:%M:%S')}] 💤💤💤 Recorded at {total_rows:,} rows — Time: {t_batch:.2f}s", file=f)
+                    X = CoocCounter() #  defaultdict(float) #
+                    del rows
+                    gc.collect()
+
+                if total_rows >= grouped_by * group_by_size:
+                    t_aggr = perf_counter() 
+                    self._aggregate_and_replace(cursor, conn)
+                    t_aggr = perf_counter() - t_aggr
+                    with open("log.txt", "a") as f: 
+                        print(f"[{datetime.now().strftime('%H:%M:%S')}] ✅✅✅ Grouped at {total_rows:,} rows — Time: {t_aggr:.2f}s", file=f)
+                    grouped_by += 1
+
+            with open("log.txt", "a") as f:
+                sp1 = " " * (2 - len(str(file_idx + 1)))
+                sp2 = " " * (12 - len(str(total_rows)))
+                print(f"[{datetime.now().strftime('%H:%M:%S')}] ✅ Processed {sp1}{file_idx+1}/{len(file_list)} chunks | total rows {sp2}{total_rows}; it took {perf_counter() - chunk_start:.2f}s", file = f)
+
+        # Final flush
+        if X:
+            total_rows += len(X)
+            rows = [(i_id, j_id, val) for (i_id, j_id), val in X.items()]
+            self._write_to_sqlite(rows, batch_size, conn, cursor)
+            del X, rows
+            gc.collect()
+
+        # Final aggregation
+        t_aggr = perf_counter() 
+        self._aggregate_and_replace(cursor, conn)
+        t_aggr = perf_counter() - t_aggr
+        with open("log.txt", "a") as f:
+            print(f"[{datetime.now().strftime('%H:%M:%S')}] ✅✅✅ Final Grouping: {t_aggr:.2f}s", file=f)
+
+        conn.close()
+        co_oc_end = perf_counter()
+        with open("log.txt", "a") as f:    
+            co_oc_end = perf_counter()
+            print(f"[{datetime.now().strftime('%H:%M:%S')}] ✨ Done. Total time: {co_oc_end - co_oc_start:.2f}s", file=f)
+
+    def _init_sqlite(self, db_path):
+        # Step 1: Init sqlite
+        conn = sqlite3.connect(db_path)
+        cursor = conn.cursor()
+        # ⚡ Speed up SQLite performance for bulk inserts
+        cursor.execute("PRAGMA journal_mode = OFF;")
+        cursor.execute("PRAGMA synchronous = OFF;")
+        cursor.execute("PRAGMA temp_store = 0;")
+        
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS cooc (
+                word_i INTEGER,
+                word_j INTEGER,
+                value  REAL
+            )
+        """)
+        conn.commit()
+        return conn, cursor
     
-    def build_co_oc_matrix(self, files_path, window_size = 5, x_max = 100, alpha = 0.75, importance = True):
-        pass
+    def _write_to_sqlite(self, rows, batch_size, conn, cursor):
+        cursor.execute("BEGIN TRANSACTION;")
+        for start in range(0, len(rows), batch_size):
+            batch = rows[start:start + batch_size]
+            cursor.executemany("""
+                INSERT INTO cooc (word_i, word_j, value)
+                VALUES (?, ?, ?)
+            """, batch)
+        conn.commit()
+
+    def _aggregate_and_replace(self, cursor, conn):
+        # Step 1: Create temp table with aggregated values
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS cooc_tmp AS
+            SELECT word_i, word_j, SUM(value) AS value
+            FROM cooc
+            GROUP BY word_i, word_j
+        """)
+        conn.commit()
+
+        # Step 2: Drop the old table
+        cursor.execute("DROP TABLE cooc;")
+        conn.commit()
+
+        # Step 3: Rename new table
+        cursor.execute("ALTER TABLE cooc_tmp RENAME TO cooc;")
+        conn.commit()
 
 
 class GloveCorpusBuilder:
@@ -202,4 +335,8 @@ if __name__ == "__main__":
     out_dir = 'corpus_tokens_wiki2018'
     builder = WikiCorpusBuilder(xml_path)
     # builder.tokenize_and_save(out_dir, chunk_size_save=100_000, chunk_size_process = 250, num_workers=8)
-    builder.build_vocab_and_freqs(tokens_chunk_dir = out_dir)
+    # builder.build_vocab_and_freqs(tokens_chunk_dir = out_dir)
+    # builder.build_co_oc_matrix(files_path=out_dir)
+    # builder.merge_into_main_chunk(os.path.join(out_dir, "cooc_chunks"))
+    # builder.merge_cooc_chunks(out_dir)
+    builder.build_co_oc_matrix_sqlite(out_dir, batch_size=20_000_000, group_by_size=2_000_000_000)
