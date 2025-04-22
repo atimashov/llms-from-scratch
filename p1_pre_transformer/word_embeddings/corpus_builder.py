@@ -13,7 +13,12 @@ import pickle
 # from pympler import asizeof
 import gc
 import sqlite3
+import torch
+import tarfile
+import io
+import argparse
 from fast_counter import CoocCounter
+
 
 class WikiCorpusBuilder:
     def __init__(self, xml_path, spacy_model = "en_core_web_sm", min_tokens = 11):
@@ -231,7 +236,7 @@ class WikiCorpusBuilder:
 
                 if total_rows >= grouped_by * group_by_size:
                     t_aggr = perf_counter() 
-                    self._aggregate_and_replace(cursor, conn)
+                    self._aggregate_and_replace_sqlite(cursor, conn)
                     t_aggr = perf_counter() - t_aggr
                     with open("log.txt", "a") as f: 
                         print(f"[{datetime.now().strftime('%H:%M:%S')}] ✅✅✅ Grouped at {total_rows:,} rows — Time: {t_aggr:.2f}s", file=f)
@@ -252,7 +257,7 @@ class WikiCorpusBuilder:
 
         # Final aggregation
         t_aggr = perf_counter() 
-        self._aggregate_and_replace(cursor, conn)
+        self._aggregate_and_replace_sqlite(cursor, conn)
         t_aggr = perf_counter() - t_aggr
         with open("log.txt", "a") as f:
             print(f"[{datetime.now().strftime('%H:%M:%S')}] ✅✅✅ Final Grouping: {t_aggr:.2f}s", file=f)
@@ -292,7 +297,7 @@ class WikiCorpusBuilder:
             """, batch)
         conn.commit()
 
-    def _aggregate_and_replace(self, cursor, conn):
+    def _aggregate_and_replace_sqlite(self, cursor, conn):
         # Step 1: Create temp table with aggregated values
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS cooc_tmp AS
@@ -309,6 +314,166 @@ class WikiCorpusBuilder:
         # Step 3: Rename new table
         cursor.execute("ALTER TABLE cooc_tmp RENAME TO cooc;")
         conn.commit()
+
+    def _sqlite_to_chunks(self, files_path, db_file_name = "cooc_matrix.db", prefix = "cooc", chunk_size = 50_000_000, save_type = '.pt', sample_per_record = True):
+        """
+        Streams co-occurrence data from a SQLite database and saves it in chunks.
+
+        Depending on `save_type`, data is saved either as:
+        - `.pt`: two PyTorch tensors (`indices_pairs` of shape (N, 2), and `cooccurrence` of shape (N,))
+        - `webdata`: WebDataset-compatible tar shards (either one tensor or per-sample records)
+
+        Args:
+            files_path (str): Base directory containing the SQLite DB and output folders.
+            db_file_name (str): Name of the SQLite file inside `files_path`.
+            prefix (str): Prefix used for naming output files (e.g. 'cooc').
+            chunk_size (int): Number of rows to fetch and store per chunk.
+            save_type (str): Either '.pt' or 'webdata', to control output format.
+        """
+        t_start = perf_counter()
+        with open("log.txt", "a") as f:
+            print(f"\n[{datetime.now().strftime('%H:%M:%S')}] 🚀 Streaming SQLite to '{save_type}' format with chunk_size = {chunk_size}", file=f)
+        
+        # Assert
+        valid_types = {".pt", "webdata"}
+        if save_type not in valid_types:
+            with open("log.txt", "a") as f:
+                error_message = f"❌ Invalid save_type: '{save_type}' (expected one of {valid_types})"
+                print(f"[{datetime.now().strftime('%H:%M:%S')}] {error_message}", file=f)
+            raise ValueError(error_message)
+
+
+        # Init connection
+        db_path = os.path.join(files_path, db_file_name)
+        conn = sqlite3.connect(db_path)
+        cur = conn.cursor()
+
+        # Extract number of rows
+        cur.execute("SELECT COUNT(*) FROM cooc")
+        total_rows = cur.fetchone()[0]
+        with open("log.txt", "a") as f:
+            print(f"[{datetime.now().strftime('%H:%M:%S')}] 📥 Will stream {total_rows:,} rows", file=f)
+
+        # Extract data from SQLite by batches
+        seen = 0
+        cur.execute("SELECT word_i, word_j, value FROM cooc")
+        for chunk_id, _ in enumerate(range(0, total_rows, chunk_size)):
+            rows = cur.fetchmany(chunk_size)
+
+            if save_type == ".pt":
+                # Save tensors
+                self._write_pt(files_path, rows, chunk_id)
+            elif save_type == "webdata":
+                # Save shards in webdata
+                self._write_shard(files_path, prefix, rows, chunk_id, sample_per_record = sample_per_record)
+
+            seen += len(rows)
+
+            # cleanup
+            del rows
+            gc.collect()
+
+            with open("log.txt", "a") as f:
+                print(f"[{datetime.now().strftime('%H:%M:%S')}] 💾 Chunk {chunk_id:04d}: saved {" " * (11 - len(str(seen)))}{seen:,}/{total_rows:,} rows", file=f)
+
+        conn.close()
+
+        with open("log.txt", "a") as f:
+            print(f"[{datetime.now().strftime('%H:%M:%S')}] ✅ Finished streaming in {perf_counter() - t_start:.2f}s", file=f)
+
+    def _write_pt(self, files_path, prefix, rows, chunk_id):
+        """
+        Saves the co-occurrence data as PyTorch .pt tensors.
+
+        Args:
+            files_path (str): Base directory where tensors should be saved.
+            prefix (str): Prefix for the saved file names (e.g. 'cooc').
+            indices_pairs (Tensor): Tensor of shape (N, 2) with (center_id, context_id) pairs.
+            cooccurrence (Tensor): Tensor of shape (N,) with co-occurrence values.
+            chunk_id (int): ID of the current chunk, used for file naming.
+        """
+        center_ids, context_ids, values = zip(*rows)
+        indices_pairs = torch.tensor([center_ids, context_ids], dtype=torch.long).T
+        cooccurrence = torch.tensor(values, dtype=torch.float)
+
+        save_dir = os.path.join(files_path, "torch_tensors")
+        os.makedirs(save_dir, exist_ok=True)
+        torch.save(indices_pairs, os.path.join(save_dir, f"{prefix}_indices_pairs_{chunk_id:04d}.pt"))
+        torch.save(cooccurrence, os.path.join(save_dir, f"{prefix}_values_{chunk_id:04d}.pt"))
+
+        # cleanup , 
+        del center_ids, context_ids, values, indices_pairs, cooccurrence
+
+
+    
+    def _write_shard(self, files_path, prefix, rows, shard_id, sample_per_record = True):
+        """
+        Writes either per-sample or full-tensor to a WebDataset-compatible tar.
+        Each record contains:
+            - __key__
+            - indices.pt (long)
+            - values.pt  (float32)
+        """
+        tar_path = os.path.join(files_path, "webdataset", f"{prefix}_{shard_id:04d}.tar")
+        os.makedirs(os.path.dirname(tar_path), exist_ok=True)
+        key_base = f"cooc_{shard_id:05d}"
+        
+        with tarfile.open(tar_path, "w") as tar:
+            if sample_per_record:
+                self._write_triplet_to_shard(tar, key_base, rows)
+            else:
+                self._write_pt_to_shard(tar, key_base, rows)
+
+    def _write_pt_to_shard(self, tar, key, rows):
+        """
+        Creates and writes a WebDataset-compatible sample to the provided tar archive.
+        Format:
+        - __key__
+        - indices_pairs.pt
+        - cooccurrence.pt
+        """
+        center_ids, context_ids, values = zip(*rows)
+        indices_pairs = torch.tensor([center_ids, context_ids], dtype=torch.long).T
+        cooccurrence = torch.tensor(values, dtype=torch.float)
+        sample = {
+            "__key__": key,
+            "indices_pairs.pt": indices_pairs,
+            "cooccurrence.pt": cooccurrence
+        }
+        
+        for name, data in sample.items():
+            if name == "__key__":
+                content = key.encode("utf-8")
+            else:
+                buffer = io.BytesIO()
+                torch.save(data, buffer, _use_new_zipfile_serialization=False)
+                content = buffer.getvalue()           
+            tarinfo = tarfile.TarInfo(name=f"{key}/{name}")
+            tarinfo.size = len(content)
+            tar.addfile(tarinfo, fileobj=io.BytesIO(content))
+        
+        # cleanup , 
+        del center_ids, context_ids, values, indices_pairs, cooccurrence
+    
+    def _write_triplet_to_shard(self, tar, key, rows):
+        """
+        Creates and writes a WebDataset-compatible row of triples to the provided tar archive.
+        Format:
+        - file_1.txt
+        - file_2.txt
+        - file_3.txt
+        ...
+
+        NOTE: it is useless in this setup, WebData limit from bottom all files by 512 bytes + 512 bytes for header.
+        So, each tar of 50M pairs will be 50M x 1024B = 51.2GB
+        """
+        for i, (center_id, context_id, cooc) in enumerate(rows):
+            filename = f"{key}_{i:06d}.txt"
+            content = f"{center_id} {context_id} {cooc}\n".encode("utf-8")
+            tarinfo = tarfile.TarInfo(name=filename)
+            tarinfo.size = len(content)
+            tar.addfile(tarinfo, io.BytesIO(content))
+
 
 
 class GloveCorpusBuilder:
@@ -330,13 +495,32 @@ class GloveCorpusBuilder:
 
 
 if __name__ == "__main__":
-    # TODO: add options to test
-    xml_path = Path.cwd().parents[1] / "data" / "enwiki-20181001-corpus.xml"
-    out_dir = 'corpus_tokens_wiki2018'
-    builder = WikiCorpusBuilder(xml_path)
-    # builder.tokenize_and_save(out_dir, chunk_size_save=100_000, chunk_size_process = 250, num_workers=8)
-    # builder.build_vocab_and_freqs(tokens_chunk_dir = out_dir)
-    # builder.build_co_oc_matrix(files_path=out_dir)
-    # builder.merge_into_main_chunk(os.path.join(out_dir, "cooc_chunks"))
-    # builder.merge_cooc_chunks(out_dir)
-    builder.build_co_oc_matrix_sqlite(out_dir, batch_size=20_000_000, group_by_size=2_000_000_000)
+    parser = argparse.ArgumentParser(description="Build and process Wikipedia corpus")
+    
+    parser.add_argument(
+        "--phase", 
+        type=str, 
+        required=True, 
+        choices=["tokenize", "vocab", "cooc", "merge_chunks", "merge_sqlite", "to_torch", "to_webdata"],
+        help="Pipeline phase to test"
+    )
+    parser.add_argument("--xml", type=str, default=str(Path.cwd().parents[1] / "data" / "enwiki-20181001-corpus.xml"))
+    parser.add_argument("--out_dir", type=str, default="corpus_tokens_wiki2018")
+    
+    args = parser.parse_args()
+
+    builder = WikiCorpusBuilder(args.xml)
+
+    if args.phase == "tokenize":
+        builder.tokenize_and_save(args.out_dir, chunk_size_save=100_000, chunk_size_process=250, num_workers=8)
+    elif args.phase == "vocab":
+        builder.build_vocab_and_freqs(tokens_chunk_dir=args.out_dir)
+    elif args.phase == "cooc":
+        builder.build_co_oc_matrix_sqlite(args.out_dir, batch_size=20_000_000, group_by_size=2_000_000_000)
+    elif args.phase == "to_torch":
+        builder._sqlite_to_chunks(args.out_dir, chunk_size=50_000_000, save_type=".pt", sample_per_record=False)
+    elif args.phase == "to_webdata":
+        builder._sqlite_to_chunks(args.out_dir, chunk_size=50_000_000, save_type="webdata", sample_per_record=False)
+    else:
+        raise ValueError(f"Unknown phase: {args.phase}")
+    
