@@ -186,7 +186,7 @@ class GloveDataSet(Dataset):
         else:
             self.worker_cache = cache
         self.curr_chunk_number = req_chunk
-                # update memory
+        # update memory
         self.get_worker_mem_mb_by_worker_id(get_worker_info())
         gc.collect()
         
@@ -240,45 +240,45 @@ def test():
     
     # create profiler
 
-    # manager = Manager()
-    # shared_mem = manager.dict({
-    #     'curr': manager.dict(),
-    #     'peak': manager.dict()
-    # })
+    manager = Manager()
+    shared_mem = manager.dict({
+        'curr': manager.dict(),
+        'peak': manager.dict()
+    })
     
-    shared_mem = None
+    # shared_mem = None
     # run Dataset
     print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    data = GloveDataSet(files_path = 'corpus_tokens_wiki2018/torch_tensors_50K', shared_mem=shared_mem)
+    data = GloveDataSet(files_path = 'corpus_tokens_wiki2018/torch_tensors_50M', shared_mem=shared_mem)
     data_loader = DataLoader(
-        data, batch_size = 400, shuffle = False, num_workers = 0, drop_last=False, pin_memory = False
+        data, batch_size = 400, shuffle = False, num_workers = 2, drop_last=False, pin_memory = False
     )
 
     # run Loop
     loop = tqdm(data_loader, leave = True)
     for batch_idx, (_, _) in enumerate(loop):
-        # if batch_idx % 1000 == 0:
-        #     data.get_worker_mem_mb_by_worker_id(None)
-        #     curr_total = sum(data.shared_mem['curr'].values())
-        #     peak_total = sum(data.shared_mem['peak'].values())
-        #     curr_main = data.shared_mem['curr']['main']
-        #     peak_main = data.shared_mem['peak']['main']
-        #     curr_1 = data.shared_mem['curr'].get(1, 0)
-        #     peak_1 = data.shared_mem['peak'].get(1, 0)
-        #     num_workers = len(data.shared_mem['curr'])
-        #     gc.collect()
-        #     loop.set_postfix(OrderedDict([
-        #             ('workers', num_workers), 
-        #             ('curr', f"{curr_total:.1f}MB"), 
-        #             ('peak', f"{peak_total:.1f}MB"), 
-        #             ('curr_main', f"{curr_main:.1f}MB"), 
-        #             ('peak_main', f"{peak_main:.1f}MB"), 
-        #             ('curr1', f"{curr_1:.1f}MB"), 
-        #             ('peak1', f"{peak_1:.1f}MB")
-        #         ])
+        if batch_idx % 1000 == 0:
+            data.get_worker_mem_mb_by_worker_id(None)
+            curr_total = sum(data.shared_mem['curr'].values())
+            peak_total = sum(data.shared_mem['peak'].values())
+            curr_main = data.shared_mem['curr']['main']
+            peak_main = data.shared_mem['peak']['main']
+            curr_1 = data.shared_mem['curr'].get(1, 0)
+            peak_1 = data.shared_mem['peak'].get(1, 0)
+            num_workers = len(data.shared_mem['curr'])
+            gc.collect()
+            loop.set_postfix(OrderedDict([
+                    ('workers', num_workers), 
+                    ('curr', f"{curr_total:.1f}MB"), 
+                    ('peak', f"{peak_total:.1f}MB"), 
+                    ('curr_main', f"{curr_main:.1f}MB"), 
+                    ('peak_main', f"{peak_main:.1f}MB"), 
+                    ('curr1', f"{curr_1:.1f}MB"), 
+                    ('peak1', f"{peak_1:.1f}MB")
+                ])
 
-        # )
-        pass
+        )
+ 
     print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
 if __name__ == '__main__':
