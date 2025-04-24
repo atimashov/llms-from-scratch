@@ -109,7 +109,7 @@ class WikiCorpusBuilder:
 
         with open("log.txt", "a") as f:
             print("\n\n" + "="*80, file = f)
-            print(f"🔁  GloVe Tokenization Run - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}", file = f)
+            print(f"🔁  GloVe Tokenization Run - {datetime.now().strftime('%Y-%m-%d %Y-%m-%d | %H:%M:%S')}", file = f)
             print(f"🕰️  Timezone           : {timezone}", file=f)
             print(f"🌍  Location           : {location}", file=f)
             print(f"🗃️  XML input          : {self.xml_path}", file = f)
@@ -125,7 +125,7 @@ class WikiCorpusBuilder:
         time_start = perf_counter()
         vocab_counter = Counter()
         with open("log.txt", "a") as f:
-            print(f"\n\n⏳ [build_vocab] Counting token frequencies - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}", file = f)
+            print(f"\n\n⏳ [build_vocab] Counting token frequencies - {datetime.now().strftime('%Y-%m-%d %Y-%m-%d | %H:%M:%S')}", file = f)
             print("="*80, file = f)
 
         # Step 1: Get corpus and calculate frequencies
@@ -186,7 +186,7 @@ class WikiCorpusBuilder:
     def build_co_oc_matrix_sqlite(self, files_path, window_size = 5, window_type = "symmetric", importance = True, batch_size = 10_000_000, group_by_size = 1_000_000_000):
         assert window_type in {"symmetric", "left", "right"}, f"❌ Invalid window_type: {window_type}"
         with open("log.txt", "a") as f:
-            print(f"\n\n[{datetime.now().strftime('%H:%M:%S')}] 🧱 Building co-occurrence matrix with window={window_size} | Batching to SQLite {batch_size} rows | Grouping every {group_by_size} rows", file = f)
+            print(f"\n\n[{datetime.now().strftime('%Y-%m-%d | %H:%M:%S')}] 🧱 Building co-occurrence matrix with window={window_size} | Batching to SQLite {batch_size} rows | Grouping every {group_by_size} rows", file = f)
 
         # Step 1: Load Vocab and Frequencies
         vocab, _, _ = self.load_vocab_and_freqs(files_path)
@@ -228,8 +228,6 @@ class WikiCorpusBuilder:
                     t_batch = perf_counter()
                     self._write_to_sqlite(rows, batch_size, conn, cursor)
                     t_batch = perf_counter() - t_batch
-                    # with open("log.txt", "a") as f: 
-                    #     print(f"[{datetime.now().strftime('%H:%M:%S')}] 💤💤💤 Recorded at {total_rows:,} rows — Time: {t_batch:.2f}s", file=f)
                     X = CoocCounter() #  defaultdict(float) #
                     del rows
                     gc.collect()
@@ -239,13 +237,13 @@ class WikiCorpusBuilder:
                     self._aggregate_and_replace_sqlite(cursor, conn)
                     t_aggr = perf_counter() - t_aggr
                     with open("log.txt", "a") as f: 
-                        print(f"[{datetime.now().strftime('%H:%M:%S')}] ✅✅✅ Grouped at {total_rows:,} rows — Time: {t_aggr:.2f}s", file=f)
+                        print(f"[{datetime.now().strftime('%Y-%m-%d | %H:%M:%S')}] ✅✅✅ Grouped at {total_rows:,} rows — Time: {t_aggr:.2f}s", file=f)
                     grouped_by += 1
 
             with open("log.txt", "a") as f:
                 sp1 = " " * (2 - len(str(file_idx + 1)))
                 sp2 = " " * (12 - len(str(total_rows)))
-                print(f"[{datetime.now().strftime('%H:%M:%S')}] ✅ Processed {sp1}{file_idx+1}/{len(file_list)} chunks | total rows {sp2}{total_rows}; it took {perf_counter() - chunk_start:.2f}s", file = f)
+                print(f"[{datetime.now().strftime('%Y-%m-%d | %H:%M:%S')}] ✅ Processed {sp1}{file_idx+1}/{len(file_list)} chunks | total rows {sp2}{total_rows}; it took {perf_counter() - chunk_start:.2f}s", file = f)
 
         # Final flush
         if X:
@@ -260,13 +258,13 @@ class WikiCorpusBuilder:
         self._aggregate_and_replace_sqlite(cursor, conn)
         t_aggr = perf_counter() - t_aggr
         with open("log.txt", "a") as f:
-            print(f"[{datetime.now().strftime('%H:%M:%S')}] ✅✅✅ Final Grouping: {t_aggr:.2f}s", file=f)
+            print(f"[{datetime.now().strftime('%Y-%m-%d | %H:%M:%S')}] ✅✅✅ Final Grouping: {t_aggr:.2f}s", file=f)
 
         conn.close()
         co_oc_end = perf_counter()
         with open("log.txt", "a") as f:    
             co_oc_end = perf_counter()
-            print(f"[{datetime.now().strftime('%H:%M:%S')}] ✨ Done. Total time: {co_oc_end - co_oc_start:.2f}s", file=f)
+            print(f"[{datetime.now().strftime('%Y-%m-%d | %H:%M:%S')}] ✨ Done. Total time: {co_oc_end - co_oc_start:.2f}s", file=f)
 
     def _init_sqlite(self, db_path):
         # Step 1: Init sqlite
@@ -332,14 +330,14 @@ class WikiCorpusBuilder:
         """
         t_start = perf_counter()
         with open("log.txt", "a") as f:
-            print(f"\n[{datetime.now().strftime('%H:%M:%S')}] 🚀 Streaming SQLite to '{save_type}' format with chunk_size = {chunk_size}", file=f)
+            print(f"\n[{datetime.now().strftime('%Y-%m-%d | %H:%M:%S')}] 🚀 Streaming SQLite to '{save_type}' format with chunk_size = {chunk_size}", file=f)
         
         # Assert
         valid_types = {".pt", "webdata"}
         if save_type not in valid_types:
             with open("log.txt", "a") as f:
                 error_message = f"❌ Invalid save_type: '{save_type}' (expected one of {valid_types})"
-                print(f"[{datetime.now().strftime('%H:%M:%S')}] {error_message}", file=f)
+                print(f"[{datetime.now().strftime('%Y-%m-%d | %H:%M:%S')}] {error_message}", file=f)
             raise ValueError(error_message)
 
 
@@ -352,17 +350,19 @@ class WikiCorpusBuilder:
         cur.execute("SELECT COUNT(*) FROM cooc")
         total_rows = cur.fetchone()[0]
         with open("log.txt", "a") as f:
-            print(f"[{datetime.now().strftime('%H:%M:%S')}] 📥 Will stream {total_rows:,} rows", file=f)
+            print(f"[{datetime.now().strftime('%Y-%m-%d | %H:%M:%S')}] 📥 Will stream {total_rows:,} rows", file=f)
 
         # Extract data from SQLite by batches
         seen = 0
         cur.execute("SELECT word_i, word_j, value FROM cooc")
+        n_chunks = total_rows // chunk_size + int(total_rows % chunk_size > 0)
+        n_log = round(n_chunks / 20)
         for chunk_id, _ in enumerate(range(0, total_rows, chunk_size)):
             rows = cur.fetchmany(chunk_size)
 
             if save_type == ".pt":
                 # Save tensors
-                self._write_pt(files_path, rows, chunk_id)
+                self._write_pt(files_path, prefix, rows, chunk_id)
             elif save_type == "webdata":
                 # Save shards in webdata
                 self._write_shard(files_path, prefix, rows, chunk_id, sample_per_record = sample_per_record)
@@ -373,13 +373,15 @@ class WikiCorpusBuilder:
             del rows
             gc.collect()
 
-            with open("log.txt", "a") as f:
-                print(f"[{datetime.now().strftime('%H:%M:%S')}] 💾 Chunk {chunk_id:04d}: saved {" " * (11 - len(str(seen)))}{seen:,}/{total_rows:,} rows", file=f)
+            # log just 20 chunk info
+            if chunk_id % n_log == 0:
+                with open("log.txt", "a") as f:
+                    print(f"[{datetime.now().strftime('%Y-%m-%d | %H:%M:%S')}] 💾 Chunk {chunk_id:04d}: saved {" " * (11 - len(str(seen)))}{seen:,}/{total_rows:,} rows", file=f)
 
         conn.close()
 
         with open("log.txt", "a") as f:
-            print(f"[{datetime.now().strftime('%H:%M:%S')}] ✅ Finished streaming in {perf_counter() - t_start:.2f}s", file=f)
+            print(f"[{datetime.now().strftime('%Y-%m-%d | %H:%M:%S')}] ✅ Finished streaming in {perf_counter() - t_start:.2f}s", file=f)
 
     def _write_pt(self, files_path, prefix, rows, chunk_id):
         """
@@ -506,6 +508,7 @@ if __name__ == "__main__":
     )
     parser.add_argument("--xml", type=str, default=str(Path.cwd().parents[1] / "data" / "enwiki-20181001-corpus.xml"))
     parser.add_argument("--out_dir", type=str, default="corpus_tokens_wiki2018")
+    parser.add_argument("--chunk_size", type=int, default = 50_000_000)
     
     args = parser.parse_args()
 
@@ -518,9 +521,9 @@ if __name__ == "__main__":
     elif args.phase == "cooc":
         builder.build_co_oc_matrix_sqlite(args.out_dir, batch_size=20_000_000, group_by_size=2_000_000_000)
     elif args.phase == "to_torch":
-        builder._sqlite_to_chunks(args.out_dir, chunk_size=50_000_000, save_type=".pt", sample_per_record=False)
+        builder._sqlite_to_chunks(args.out_dir, chunk_size=args.chunk_size, save_type=".pt", sample_per_record=False)
     elif args.phase == "to_webdata":
-        builder._sqlite_to_chunks(args.out_dir, chunk_size=50_000_000, save_type="webdata", sample_per_record=False)
+        builder._sqlite_to_chunks(args.out_dir, chunk_size=args.chunk_size, save_type="webdata", sample_per_record=False)
     else:
         raise ValueError(f"Unknown phase: {args.phase}")
     

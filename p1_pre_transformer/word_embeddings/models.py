@@ -43,7 +43,44 @@ class SkipGram(nn.Module):
             cos_positive = None
             cos_negative = None
         return cos_positive, cos_negative    
-    
+
+class GloVe(nn.Module):
+    def __init__(self, vocab_size = 400_000, emb_size = 300, x_max = 100, _alpha = 0.75):
+        super(GloVe, self).__init__()
+        self.x_max = x_max
+        self._alpha = _alpha
+        # init embeddings and its weights
+        scale = 0.5 / emb_size
+        self.w_center = nn.Embedding(vocab_size, emb_size)
+        self.w_context = nn.Embedding(vocab_size, emb_size)
+        self.b_center =  nn.Embedding(vocab_size, 1)
+        self.b_context = nn.Embedding(vocab_size, 1)
+        with torch.no_grad():
+            self.w_center.weight.uniform_(-scale, scale)
+            self.w_context.weight.uniform_(-scale, scale)
+            self.b_center.weight.zero_()
+            self.b_context.weight.zero_()
+
+    def forward(self, ids, X, epsilon = 1e-8):
+        dot = (self.w_center(ids[:,0]) * self.w_context(ids[:,1])).sum(axis = 1, keepdim = True)
+        bias = (self.b_center(ids[:,0]) + self.b_context(ids[:,1]))
+        weight = self._weight_f(X)
+        delta = dot + bias - torch.log(X + epsilon)
+        return weight, delta
+
+    def _weight_f(self, x):
+        mask = x < self.x_max
+        out = torch.ones_like(x)
+        out[mask] = (x[mask] / self.x_max) ** self._alpha
+        return out
+
+
+
+
 if __name__ == '__main__':
-    pass
+    input = torch.LongTensor([[1, 2], [4, 5], [4, 3], [2, 9]])
+    X = torch.randn(4, 1)
+    model = GloVe(vocab_size = 1000)
+    weight, delta = model(input, X)
+    print(input.shape, X.shape, weight.shape, delta.shape)
 
