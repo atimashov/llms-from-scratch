@@ -44,7 +44,7 @@ def train_epoch_glove(loader, model, optimizer, loss_fn, device = 'cpu', gpu_bat
     return loss.item()
 
 
-def train_loop(use_case, batch_size, epochs, lr, device, num_workers = None, gpu_batched = True):
+def train_loop(use_case, batch_size, epochs, lr, device, num_workers = None, gpu_batched = False):
     assert use_case in {'skipgram', 'glove'}
     print(f"[{datetime.now().strftime('%Y-%m-%d | %H:%M:%S')}] Train loop started")
     if use_case == 'skipgram':
@@ -54,14 +54,14 @@ def train_loop(use_case, batch_size, epochs, lr, device, num_workers = None, gpu
         loss_fn = Word2VecLoss()
     else:
         train_epoch = train_epoch_glove
-        data = GloveDataSet(files_path = '/content/GloVe_training', chunk_folder_name = 'torch_tensors_50M')
+        data = GloveDataSet(files_path = '/content/GloVe_training', chunk_folder_name = 'torch_tensors_50M', device = device if gpu_batched and device != 'cpu' else 'cpu')
         model = GloVe(vocab_size=len(data._id_to_tokens))
         loss_fn = GloveLoss()
     if num_workers is None:
         num_workers = min(4, os.cpu_count() - 1)
     print(f"[{datetime.now().strftime('%Y-%m-%d | %H:%M:%S')}] Creating DataLoader")
     loader = DataLoader(
-        data, batch_size = batch_size, shuffle = use_case != 'glove', num_workers = num_workers, drop_last=False, pin_memory = device != 'cpu'
+        data, batch_size = batch_size, shuffle = use_case != 'glove', num_workers = num_workers, drop_last=False, pin_memory = device != 'cpu' and not gpu_batched
     )
    
     model = model.to(device)
@@ -97,4 +97,4 @@ if __name__ == "__main__":
     parser.add_argument('--device', type = str, default = 'cuda:0', help = 'cuda, cuda:<n>, or cpu')
     inputs = parser.parse_args()
     # TODO: check CPU 
-    train_loop(inputs.use_case, inputs.batch_size, inputs.epochs, inputs.lr, inputs.device)
+    train_loop(inputs.use_case, inputs.batch_size, inputs.epochs, inputs.lr, inputs.device, gpu_batched = True)

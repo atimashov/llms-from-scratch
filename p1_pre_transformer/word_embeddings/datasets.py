@@ -16,6 +16,9 @@ import gc
 from multiprocessing import Manager
 from multiprocessing import current_process
 
+import torch.multiprocessing as mp
+
+
 class StanfordSentiment(Dataset):
     def __init__(
             self, context = 5, path='datasets/stanfordSentimentTreebank', repeat = 30
@@ -138,6 +141,8 @@ class GloveDataSet(Dataset):
     def __init__(self, files_path = 'corpus_tokens_wiki2018', chunk_folder_name = 'torch_tensors', files_type = '.pt', device = 'cpu', shared_mem = None):
         super().__init__()
         self.device = device
+        if self.device != 'cpu':
+            mp.set_start_method('spawn', force=True)
         if shared_mem:
             self.shared_mem = shared_mem
         self.files_path = files_path
@@ -182,24 +187,17 @@ class GloveDataSet(Dataset):
     def _update_curr_chunk(self, req_chunk, worker_info = None, idx = 0):
         is_global = worker_info is None
         # current chunk is correct (either in global or local memory)
-        # print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] _update_curr_chunk 1: {req_chunk} | is_global = {is_global} | idx = {idx}")
         if hasattr(self, 'curr_chunk_number') and self.curr_chunk_number == req_chunk:
             return
         
-        # print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] _update_curr_chunk 2: {req_chunk} | is_global = {is_global} | idx = {idx}")
         file_name_pairs = os.path.join(self.files_path, self.chunks_folder_name, f"cooc_indices_pairs_{req_chunk:04d}.pt")
         file_name_cooc = os.path.join(self.files_path, self.chunks_folder_name, f"cooc_values_{req_chunk:04d}.pt")
         cache = {
-            'pairs_tensor': torch.load(file_name_pairs),
-            'cooc_tensor': torch.load(file_name_cooc),
+            'pairs_tensor': torch.load(file_name_pairs) if self.device == 'cpu' else torch.load(file_name_pairs).to(self.device) ,
+            'cooc_tensor': torch.load(file_name_cooc) if self.device == 'cpu' else torch.load(file_name_cooc).to(self.device),
             'shuffled_indices': [i for i in range(self.chunk_to_len[req_chunk])],
         }
         shuffle(cache['shuffled_indices'])
-        
-        # put tensors to GPU if required
-        if self.device != 'cpu':
-            for k in cache:
-                cache[k].to(device)
 
         if is_global:
             self.global_cache = cache
@@ -217,14 +215,9 @@ class GloveDataSet(Dataset):
     def __getitem__(self, idx):
         worker_info = get_worker_info()
         is_global = worker_info is None # global cache or per-worker cache
-        # print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] worker_info")
-        # print(worker_info)
-        # print()
 
         # get chunk id and row position inside list of shuffled indices of this chunk
         req_chunk, req_position = self._get_chunk_numbers(idx)
-        # print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] req_chunk & req_position", req_chunk, req_position)
-        # print()
 
         # update current chunks and shuffled indices (if necessary)
         self._update_curr_chunk(req_chunk, worker_info, idx)
