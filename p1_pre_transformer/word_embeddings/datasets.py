@@ -249,7 +249,9 @@ def test():
     # shared_mem = None
     # run Dataset
     print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    data = GloveDataSet(files_path = 'corpus_tokens_wiki2018/torch_tensors_50M', shared_mem=shared_mem)
+    # files_path = 'corpus_tokens_wiki2018/torch_tensors_50M'
+    files_path = '/content/drive/MyDrive/torch_tensors_50M'
+    data = GloveDataSet(files_path = files_path, shared_mem=shared_mem)
     data_loader = DataLoader(
         data, batch_size = 400, shuffle = False, num_workers = 2, drop_last=False, pin_memory = False
     )

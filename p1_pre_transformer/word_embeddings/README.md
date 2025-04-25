@@ -42,3 +42,7 @@ Add details after implementation.
 ### Dependencies
 ```bash
 pip install torch 
+
+### Notes
+To build Cython-based counter, run
+python setup.py build_ext --inplace

@@ -1,0 +1,26 @@
+name: llms
+channels:
+  - conda-forge
+  - defaults
+  # Add these channels if using GPU (or just follow command for pytorch+GPU):
+  # - pytorch
+  # - nvidia
+
+dependencies:
+  - python=3.12
+  - pip
+  - numpy
+  # - pytorch=2.6.*  # CPU-only version (works on Mac M2 and Linux CPU)
+  - tqdm
+  - psutil
+  - pyyaml
+  - spacy
+  - lxml
+  - requests
+  - cython
+  - setuptools
+  - pip:
+      - py-spy
+
+# For GPU install (Check appropriate Cuda version):
+# pip install torch==2.6.* --index-url https://download.pytorch.org/whl/cu124
