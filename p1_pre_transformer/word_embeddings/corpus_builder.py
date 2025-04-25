@@ -125,7 +125,7 @@ class WikiCorpusBuilder:
         time_start = perf_counter()
         vocab_counter = Counter()
         with open("log.txt", "a") as f:
-            print(f"\n\n⏳ [build_vocab] Counting token frequencies - {datetime.now().strftime('%Y-%m-%d %Y-%m-%d | %H:%M:%S')}", file = f)
+            print(f"\n\n⏳ [build_vocab] Counting token frequencies for {max_vocab_size} tokens - {datetime.now().strftime('%Y-%m-%d | %H:%M:%S')}", file = f)
             print("="*80, file = f)
 
         # Step 1: Get corpus and calculate frequencies
@@ -185,6 +185,7 @@ class WikiCorpusBuilder:
 
     def build_co_oc_matrix_sqlite(self, files_path, window_size = 5, window_type = "symmetric", importance = True, batch_size = 10_000_000, group_by_size = 1_000_000_000):
         assert window_type in {"symmetric", "left", "right"}, f"❌ Invalid window_type: {window_type}"
+        # TODO: Add info about vocab size
         with open("log.txt", "a") as f:
             print(f"\n\n[{datetime.now().strftime('%Y-%m-%d | %H:%M:%S')}] 🧱 Building co-occurrence matrix with window={window_size} | Batching to SQLite {batch_size} rows | Grouping every {group_by_size} rows", file = f)
 
@@ -503,12 +504,13 @@ if __name__ == "__main__":
         "--phase", 
         type=str, 
         required=True, 
-        choices=["tokenize", "vocab", "cooc", "merge_chunks", "merge_sqlite", "to_torch", "to_webdata"],
+        choices=["tokenize", "build_vocab", "cooc", "merge_chunks", "merge_sqlite", "to_torch", "to_webdata"],
         help="Pipeline phase to test"
     )
     parser.add_argument("--xml", type=str, default=str(Path.cwd().parents[1] / "data" / "enwiki-20181001-corpus.xml"))
-    parser.add_argument("--out_dir", type=str, default="corpus_tokens_wiki2018")
-    parser.add_argument("--chunk_size", type=int, default = 50_000_000)
+    parser.add_argument("--out-dir", type=str, default="corpus_tokens_wiki2018")
+    parser.add_argument("--chunk-size", type=int, default = 50_000_000)
+    parser.add_argument("--vocab-size", type=int, default = 400_000)
     
     args = parser.parse_args()
 
@@ -516,8 +518,8 @@ if __name__ == "__main__":
 
     if args.phase == "tokenize":
         builder.tokenize_and_save(args.out_dir, chunk_size_save=100_000, chunk_size_process=250, num_workers=8)
-    elif args.phase == "vocab":
-        builder.build_vocab_and_freqs(tokens_chunk_dir=args.out_dir)
+    elif args.phase == "build_vocab":
+        builder.build_vocab_and_freqs(tokens_chunk_dir=args.out_dir, max_vocab_size=args.vocab_size)
     elif args.phase == "cooc":
         builder.build_co_oc_matrix_sqlite(args.out_dir, batch_size=20_000_000, group_by_size=2_000_000_000)
     elif args.phase == "to_torch":

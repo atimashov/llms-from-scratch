@@ -3,6 +3,8 @@ import json
 from collections import defaultdict, OrderedDict
 from random import random, shuffle
 import numpy as np
+
+import pickle
 import torch
 from torch.utils.data import Dataset, DataLoader, get_worker_info
 
@@ -133,19 +135,31 @@ class GloveDataSet(Dataset):
     """
     NOTE: use batch sizes only that are parts of .pt shapes
     """
-    def __init__(self, files_path = 'corpus_tokens_wiki2018/torch_tensors', files_type = '.pt', shared_mem = None):
+    def __init__(self, files_path = 'corpus_tokens_wiki2018', chunk_folder_name = 'torch_tensors', files_type = '.pt', shared_mem = None):
         super().__init__()
         if shared_mem:
             self.shared_mem = shared_mem
         self.files_path = files_path
+
+        # get vocab data
+        vocab_path = os.path.join(files_path, "vocab_details.pkl")
+        if not os.path.exists(vocab_path):
+            raise FileNotFoundError(f"❌ Vocab file not found: {vocab_path}")
+        
+        with open(vocab_path, "rb") as f:
+            data = pickle.load(f)
+        self._id_to_tokens = data["id_to_token"] # NOTE: rename
+
+        # create metadata
+        self.chunks_folder_name = chunk_folder_name
         self.total_rows = 0
         # TODO: create proper randomness (seed)
         # create random mapping
         self.chunk_to_len = {}
-        for i_chunk, pt_name in enumerate(sorted(os.listdir(files_path))):
+        for i_chunk, pt_name in enumerate(sorted(os.listdir(os.path.join(files_path, self.chunks_folder_name)))):
             if not pt_name.startswith("cooc_indices_pairs"):
                 continue
-            tmp_pt = torch.load(os.path.join(files_path, pt_name))
+            tmp_pt = torch.load(os.path.join(files_path, self.chunks_folder_name, pt_name))
             self.total_rows += tmp_pt.shape[0]
             self.chunk_to_len[i_chunk] = tmp_pt.shape[0]
         self.chunks = len(self.chunk_to_len)
