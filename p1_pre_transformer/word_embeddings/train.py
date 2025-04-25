@@ -16,7 +16,7 @@ from utils import print_start, print_end, save_checkpoint
 
 
 
-def train_epoch_skipgram(loader, model, optimizer, loss_fn, device = 'cpu'):
+def train_epoch_skipgram(loader, model, optimizer, loss_fn, device = 'cpu', gpu_batched = True):
     loop = tqdm(loader, leave = True)
 
     for center_ids, context_ids in loop:
@@ -28,10 +28,14 @@ def train_epoch_skipgram(loader, model, optimizer, loss_fn, device = 'cpu'):
         loop.set_postfix(loss = loss.item()) # NOTE: Add time
     return loss.item()
 
-def train_epoch_glove(loader, model, optimizer, loss_fn, device = 'cpu'):
+def train_epoch_glove(loader, model, optimizer, loss_fn, device = 'cpu', gpu_batched = True):
+    """
+    GPU batched?
+    """
     loop = tqdm(loader, leave = True)
     for pairs, cooccurence in loop:
-        pairs, cooccurence = pairs.to(device), cooccurence.to(device)
+        if device == 'cpu' or not gpu_batched:
+            pairs, cooccurence = pairs.to(device), cooccurence.to(device)
         weight, delta = model(pairs, cooccurence)
         loss = loss_fn(weight, delta)
         loss.backward()
@@ -40,7 +44,7 @@ def train_epoch_glove(loader, model, optimizer, loss_fn, device = 'cpu'):
     return loss.item()
 
 
-def train_loop(use_case, batch_size, epochs, lr, device, num_workers = None):
+def train_loop(use_case, batch_size, epochs, lr, device, num_workers = None, gpu_batched = True):
     assert use_case in {'skipgram', 'glove'}
     print(f"[{datetime.now().strftime('%Y-%m-%d | %H:%M:%S')}] Train loop started")
     if use_case == 'skipgram':
@@ -50,7 +54,7 @@ def train_loop(use_case, batch_size, epochs, lr, device, num_workers = None):
         loss_fn = Word2VecLoss()
     else:
         train_epoch = train_epoch_glove
-        data = GloveDataSet(files_path = '/content', chunk_folder_name = 'torch_tensors_50M')
+        data = GloveDataSet(files_path = '/content/GloVe_training', chunk_folder_name = 'torch_tensors_50M')
         model = GloVe(vocab_size=len(data._id_to_tokens))
         loss_fn = GloveLoss()
     if num_workers is None:
@@ -71,7 +75,7 @@ def train_loop(use_case, batch_size, epochs, lr, device, num_workers = None):
     for epoch in range(epochs):
         t = perf_counter()
         print_start(epoch)
-        loss = train_epoch(loader, model, optimizer, loss_fn, device = device)
+        loss = train_epoch(loader, model, optimizer, loss_fn, device = device, gpu_batched = gpu_batched)
         print_end(int(perf_counter() - t))
         # save model
         save_checkpoint(model=model, epoch=epoch, loss=round(loss, 3), lr = lr, batch_size = batch_size)

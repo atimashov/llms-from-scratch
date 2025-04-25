@@ -21,6 +21,7 @@ dependencies:
   - setuptools
   - pip:
       - py-spy
+      - termcolor
 
 # For GPU install (Check appropriate Cuda version):
 # pip install torch==2.6.* --index-url https://download.pytorch.org/whl/cu124

@@ -135,8 +135,9 @@ class GloveDataSet(Dataset):
     """
     NOTE: use batch sizes only that are parts of .pt shapes
     """
-    def __init__(self, files_path = 'corpus_tokens_wiki2018', chunk_folder_name = 'torch_tensors', files_type = '.pt', shared_mem = None):
+    def __init__(self, files_path = 'corpus_tokens_wiki2018', chunk_folder_name = 'torch_tensors', files_type = '.pt', device = 'cpu', shared_mem = None):
         super().__init__()
+        self.device = device
         if shared_mem:
             self.shared_mem = shared_mem
         self.files_path = files_path
@@ -186,14 +187,19 @@ class GloveDataSet(Dataset):
             return
         
         # print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] _update_curr_chunk 2: {req_chunk} | is_global = {is_global} | idx = {idx}")
-        file_name_pairs = os.path.join(self.files_path, f"cooc_indices_pairs_{req_chunk:04d}.pt")
-        file_name_cooc = os.path.join(self.files_path, f"cooc_values_{req_chunk:04d}.pt")
+        file_name_pairs = os.path.join(self.files_path, self.chunks_folder_name, f"cooc_indices_pairs_{req_chunk:04d}.pt")
+        file_name_cooc = os.path.join(self.files_path, self.chunks_folder_name, f"cooc_values_{req_chunk:04d}.pt")
         cache = {
             'pairs_tensor': torch.load(file_name_pairs),
             'cooc_tensor': torch.load(file_name_cooc),
             'shuffled_indices': [i for i in range(self.chunk_to_len[req_chunk])],
         }
         shuffle(cache['shuffled_indices'])
+        
+        # put tensors to GPU if required
+        if self.device != 'cpu':
+            for k in cache:
+                cache[k].to(device)
 
         if is_global:
             self.global_cache = cache
