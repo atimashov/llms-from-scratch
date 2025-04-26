@@ -14,4 +14,4 @@ class GloveLoss(nn.Module):
         super().__init__()
 
     def forward(self, weights, deltas):
-        return (weights * deltas**2).sum()
+        return (weights * deltas**2).mean() # sum in Original paper

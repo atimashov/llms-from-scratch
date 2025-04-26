@@ -1,6 +1,7 @@
 import torch
 from torch import nn
 import torch.optim as optim
+from torch.optim.lr_scheduler import StepLR
 from torch.utils.data import Dataset, DataLoader
 
 from tqdm import tqdm
@@ -28,7 +29,7 @@ def train_epoch_skipgram(loader, model, optimizer, loss_fn, device = 'cpu', gpu_
         loop.set_postfix(loss = loss.item()) # NOTE: Add time
     return loss.item()
 
-def train_epoch_glove(loader, model, optimizer, loss_fn, device = 'cpu', gpu_batched = True):
+def train_epoch_glove(loader, model, optimizer, scheduler, loss_fn, device = 'cpu', gpu_batched = True):
     """
     GPU batched?
     """
@@ -40,11 +41,12 @@ def train_epoch_glove(loader, model, optimizer, loss_fn, device = 'cpu', gpu_bat
         loss = loss_fn(weight, delta)
         loss.backward()
         optimizer.step()
+        scheduler.step()
         loop.set_postfix(loss = loss.item()) # NOTE: Add time
     return loss.item()
 
 
-def train_loop(use_case, batch_size, epochs, lr, device, num_workers = None, gpu_batched = False):
+def train_loop(files_path, use_case, batch_size, epochs, lr, device, num_workers = None, gpu_batched = False):
     assert use_case in {'skipgram', 'glove'}
     print(f"[{datetime.now().strftime('%Y-%m-%d | %H:%M:%S')}] Train loop started")
     if use_case == 'skipgram':
@@ -54,7 +56,7 @@ def train_loop(use_case, batch_size, epochs, lr, device, num_workers = None, gpu
         loss_fn = Word2VecLoss()
     else:
         train_epoch = train_epoch_glove
-        data = GloveDataSet(files_path = '/content/GloVe_training', chunk_folder_name = 'torch_tensors_50M', device = device if gpu_batched and device != 'cpu' else 'cpu')
+        data = GloveDataSet(files_path = files_path, chunk_folder_name = 'torch_tensors', device = device if gpu_batched and device != 'cpu' else 'cpu')
         model = GloVe(vocab_size=len(data._id_to_tokens))
         loss_fn = GloveLoss()
     if num_workers is None:
@@ -69,13 +71,14 @@ def train_loop(use_case, batch_size, epochs, lr, device, num_workers = None, gpu
     save_checkpoint(model=model, epoch='pre', loss='NA', lr = lr, batch_size = batch_size)
     
     optimizer = optim.Adam(model.parameters(), lr = lr, weight_decay = 0)
+    scheduler = StepLR(optimizer, step_size=1000, gamma=0.5)  # every 1000 steps, halve LR
     
     print(f"[{datetime.now().strftime('%Y-%m-%d | %H:%M:%S')}] Start epoch")
     # start training
     for epoch in range(epochs):
         t = perf_counter()
         print_start(epoch)
-        loss = train_epoch(loader, model, optimizer, loss_fn, device = device, gpu_batched = gpu_batched)
+        loss = train_epoch(loader, model, optimizer, scheduler, loss_fn, device = device, gpu_batched = gpu_batched)
         print_end(int(perf_counter() - t))
         # save model
         save_checkpoint(model=model, epoch=epoch, loss=round(loss, 3), lr = lr, batch_size = batch_size)
@@ -83,6 +86,7 @@ def train_loop(use_case, batch_size, epochs, lr, device, num_workers = None, gpu
 
 
 if __name__ == "__main__":
+    # DEFAULT: python train.py --use-case glove --batch-size 400 --epochs 1
     parser = ArgumentParser()
     parser.add_argument(
         "--use-case", 
@@ -91,10 +95,13 @@ if __name__ == "__main__":
         choices=["glove", "skipgram"],
         help="Use case to train"
     )
+    parser.add_argument('--files-path', type=str, default = '/content/vocab_30K_100M_20M')
     parser.add_argument('--batch-size', type = int, default = 4, help = 'Size of the batch')
     parser.add_argument('--epochs', type = int, default = 10, help = 'Number of epochs to train')
     parser.add_argument('--lr', type = float, default = 0.001, help = 'Number of epochs to train')
     parser.add_argument('--device', type = str, default = 'cuda:0', help = 'cuda, cuda:<n>, or cpu')
     inputs = parser.parse_args()
+
+    
     # TODO: check CPU 
-    train_loop(inputs.use_case, inputs.batch_size, inputs.epochs, inputs.lr, inputs.device, gpu_batched = True)
+    train_loop(inputs.files_path, inputs.use_case, inputs.batch_size, inputs.epochs, inputs.lr, inputs.device, gpu_batched = True)
