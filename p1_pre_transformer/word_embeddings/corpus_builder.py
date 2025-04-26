@@ -199,7 +199,8 @@ class WikiCorpusBuilder:
         # Step 3: Iterate over chunks
         co_oc_start = perf_counter()
         total_articles = 0
-        total_rows = 0
+        nrows_scanned = 0
+        nrows_indb = 0
         grouped_by = 1
         X =  CoocCounter()
         file_list = [f for f in os.listdir(files_path) if f.endswith(".pkl") and f.startswith("chunk_")] # each chunk contains 10K articles
@@ -215,40 +216,40 @@ class WikiCorpusBuilder:
                         weight = 1.0 / distance if importance else 1.0
                         if window_type != "right" and center_idx - distance >= 0:
                             context_id = token_ids[center_idx - distance]
-                            # X[(center_id, context_id)] += weight
                             X.update(center_id, context_id, weight)
                         if window_type != "left" and center_idx + distance < len(token_ids):
                             context_id = token_ids[center_idx + distance]
-                            # X[(center_id, context_id)] += weight
                             X.update(center_id, context_id, weight)
                 total_articles += 1
 
                 if len(X) >= batch_size:
-                    total_rows += len(X)
+                    nrows_scanned += len(X)
+                    nrows_indb += len(X)
                     rows = [(i_id, j_id, val) for (i_id, j_id), val in X.items()]
                     t_batch = perf_counter()
                     self._write_to_sqlite(rows, batch_size, conn, cursor)
                     t_batch = perf_counter() - t_batch
-                    X = CoocCounter() #  defaultdict(float) #
+                    X = CoocCounter()
                     del rows
                     gc.collect()
 
-                if total_rows >= grouped_by * group_by_size:
+                if nrows_scanned >= grouped_by * group_by_size: # NOTE: does this logic make sense? 
                     t_aggr = perf_counter() 
-                    self._aggregate_and_replace_sqlite(cursor, conn)
+                    nrows_indb = self._aggregate_and_replace_sqlite(cursor, conn)
                     t_aggr = perf_counter() - t_aggr
                     with open("log.txt", "a") as f: 
-                        print(f"[{datetime.now().strftime('%Y-%m-%d | %H:%M:%S')}] ✅✅✅ Grouped at {total_rows:,} rows — Time: {t_aggr:.2f}s", file=f)
+                        print(f"[{datetime.now().strftime('%Y-%m-%d | %H:%M:%S')}] ✅✅✅ Aggregated {nrows_scanned:,} rows -> {nrows_indb:,} rows after grouping — Time: {t_aggr:.2f}s", file=f)
                     grouped_by += 1
 
             with open("log.txt", "a") as f:
                 sp1 = " " * (2 - len(str(file_idx + 1)))
-                sp2 = " " * (12 - len(str(total_rows)))
-                print(f"[{datetime.now().strftime('%Y-%m-%d | %H:%M:%S')}] ✅ Processed {sp1}{file_idx+1}/{len(file_list)} chunks | total rows {sp2}{total_rows}; it took {perf_counter() - chunk_start:.2f}s", file = f)
+                sp2 = " " * (12 - len(str(nrows_scanned)))
+                sp3 = " " * (12 - len(str(nrows_indb)))
+                print(f"[{datetime.now().strftime('%Y-%m-%d | %H:%M:%S')}] ✅ Processed {sp1}{file_idx+1}/{len(file_list)} chunks | scanned rows {sp2}{nrows_scanned:,} | in DB rows {sp3}{nrows_indb:,}; it took {perf_counter() - chunk_start:.2f}s", file = f)
 
         # Final flush
         if X:
-            total_rows += len(X)
+            nrows_scanned += len(X)
             rows = [(i_id, j_id, val) for (i_id, j_id), val in X.items()]
             self._write_to_sqlite(rows, batch_size, conn, cursor)
             del X, rows
@@ -256,10 +257,10 @@ class WikiCorpusBuilder:
 
         # Final aggregation
         t_aggr = perf_counter() 
-        self._aggregate_and_replace_sqlite(cursor, conn)
+        nrows_indb = self._aggregate_and_replace_sqlite(cursor, conn, vacuum = True)
         t_aggr = perf_counter() - t_aggr
         with open("log.txt", "a") as f:
-            print(f"[{datetime.now().strftime('%Y-%m-%d | %H:%M:%S')}] ✅✅✅ Final Grouping: {t_aggr:.2f}s", file=f)
+            print(f"[{datetime.now().strftime('%Y-%m-%d | %H:%M:%S')}] ✅✅✅ Final Aggregation: {nrows_scanned:,} rows -> {nrows_indb:,} rows after grouping — Time: {t_aggr:.2f}s", file=f)
 
         conn.close()
         co_oc_end = perf_counter()
@@ -296,7 +297,7 @@ class WikiCorpusBuilder:
             """, batch)
         conn.commit()
 
-    def _aggregate_and_replace_sqlite(self, cursor, conn):
+    def _aggregate_and_replace_sqlite(self, cursor, conn, vacuum = False):
         # Step 1: Create temp table with aggregated values
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS cooc_tmp AS
@@ -314,7 +315,25 @@ class WikiCorpusBuilder:
         cursor.execute("ALTER TABLE cooc_tmp RENAME TO cooc;")
         conn.commit()
 
-    def _sqlite_to_chunks(self, files_path, db_file_name = "cooc_matrix.db", prefix = "cooc", chunk_size = 50_000_000, save_type = '.pt', sample_per_record = True):
+        # Step 4: VACUUM the database
+        if vacuum:
+            cursor.execute("VACUUM;")
+            conn.commit()
+
+        # Step 5: Count and return the number of rows
+        cursor.execute("SELECT COUNT(*) FROM cooc;")
+        return cursor.fetchone()[0]
+    
+    def _get_nrows_sqlite(self, db_path):
+        conn = sqlite3.connect(db_path)
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM cooc;")
+        nrows = cursor.fetchone()[0]
+        conn.close()
+        return nrows
+
+
+    def _sqlite_to_chunks(self, files_path, db_file_name = "cooc_matrix.db", prefix = "cooc", chunk_size = 50_000_000, max_nrows = -1, save_type = '.pt', sample_per_record = True):
         """
         Streams co-occurrence data from a SQLite database and saves it in chunks.
 
@@ -331,7 +350,7 @@ class WikiCorpusBuilder:
         """
         t_start = perf_counter()
         with open("log.txt", "a") as f:
-            print(f"\n[{datetime.now().strftime('%Y-%m-%d | %H:%M:%S')}] 🚀 Streaming SQLite to '{save_type}' format with chunk_size = {chunk_size}", file=f)
+            print(f"\n[{datetime.now().strftime('%Y-%m-%d | %H:%M:%S')}] 🚀 Streaming SQLite to '{save_type}' format with chunk_size = {chunk_size:,}", file=f)
         
         # Assert
         valid_types = {".pt", "webdata"}
@@ -349,16 +368,22 @@ class WikiCorpusBuilder:
 
         # Extract number of rows
         cur.execute("SELECT COUNT(*) FROM cooc")
-        total_rows = cur.fetchone()[0]
+        nrows_indb = cur.fetchone()[0]
         with open("log.txt", "a") as f:
-            print(f"[{datetime.now().strftime('%Y-%m-%d | %H:%M:%S')}] 📥 Will stream {total_rows:,} rows", file=f)
+            nrows_log = nrows_indb if max_nrows == -1 else min(nrows_indb, max_nrows)
+            print(f"[{datetime.now().strftime('%Y-%m-%d | %H:%M:%S')}] 📥 Will stream {nrows_log:,}/{nrows_indb:,} rows", file=f)
 
         # Extract data from SQLite by batches
         seen = 0
-        cur.execute("SELECT word_i, word_j, value FROM cooc")
-        n_chunks = total_rows // chunk_size + int(total_rows % chunk_size > 0)
-        n_log = round(n_chunks / 20)
-        for chunk_id, _ in enumerate(range(0, total_rows, chunk_size)):
+        if max_nrows == -1 or nrows_indb <= max_nrows:
+            query = "SELECT word_i, word_j, value FROM cooc"
+        else: 
+            query = f"SELECT word_i, word_j, value FROM cooc ORDER BY value DESC LIMIT {max_nrows}"
+            nrows_indb = max_nrows # technically, it is not number of rows in DB, but it is what I use below
+        cur.execute(query)
+        n_chunks = nrows_indb // chunk_size + int(nrows_indb % chunk_size > 0)
+        n_log = max(round(n_chunks / 20), 1)
+        for chunk_id, _ in enumerate(range(0, nrows_indb, chunk_size)):
             rows = cur.fetchmany(chunk_size)
 
             if save_type == ".pt":
@@ -377,7 +402,7 @@ class WikiCorpusBuilder:
             # log just 20 chunk info
             if chunk_id % n_log == 0:
                 with open("log.txt", "a") as f:
-                    print(f"[{datetime.now().strftime('%Y-%m-%d | %H:%M:%S')}] 💾 Chunk {chunk_id:04d}: saved {" " * (11 - len(str(seen)))}{seen:,}/{total_rows:,} rows", file=f)
+                    print(f"[{datetime.now().strftime('%Y-%m-%d | %H:%M:%S')}] 💾 Chunk {chunk_id:04d}: saved {" " * (11 - len(str(seen)))}{seen:,}/{nrows_indb:,} rows", file=f)
 
         conn.close()
 
@@ -496,7 +521,8 @@ class GloveCorpusBuilder:
         self.word_freq = defaultdict(int)
         self.co_oc_matrix = defaultdict(float)
 
-
+# TODO: check if I properly closed / opened "conn" connections
+# TODO: think about folder savings based on vocab_size
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Build and process Wikipedia corpus")
     
@@ -504,13 +530,14 @@ if __name__ == "__main__":
         "--phase", 
         type=str, 
         required=True, 
-        choices=["tokenize", "build_vocab", "cooc", "merge_chunks", "merge_sqlite", "to_torch", "to_webdata"],
+        choices=["tokenize", "build_vocab", "build_cooc", "cooc_len", "merge_chunks", "merge_sqlite", "to_torch", "to_webdata"],
         help="Pipeline phase to test"
     )
-    parser.add_argument("--xml", type=str, default=str(Path.cwd().parents[1] / "data" / "enwiki-20181001-corpus.xml"))
-    parser.add_argument("--out-dir", type=str, default="corpus_tokens_wiki2018")
-    parser.add_argument("--chunk-size", type=int, default = 50_000_000)
-    parser.add_argument("--vocab-size", type=int, default = 400_000)
+    parser.add_argument("--xml", type = str, default=str(Path.cwd().parents[1] / "data" / "enwiki-20181001-corpus.xml"))
+    parser.add_argument("--out-dir", type = str, default="corpus_tokens_wiki2018")
+    parser.add_argument("--chunk-size", type = int, default = 50_000_000)
+    parser.add_argument("--vocab-size", type = int, default = 400_000)
+    parser.add_argument("--cooc-size", type = int, default = -1, help = "Should I shrink co-occurence matrix? '-1' means NO.")
     
     args = parser.parse_args()
 
@@ -520,12 +547,16 @@ if __name__ == "__main__":
         builder.tokenize_and_save(args.out_dir, chunk_size_save=100_000, chunk_size_process=250, num_workers=8)
     elif args.phase == "build_vocab":
         builder.build_vocab_and_freqs(tokens_chunk_dir=args.out_dir, max_vocab_size=args.vocab_size)
-    elif args.phase == "cooc":
-        builder.build_co_oc_matrix_sqlite(args.out_dir, batch_size=20_000_000, group_by_size=2_000_000_000)
+    elif args.phase == "build_cooc":
+        builder.build_co_oc_matrix_sqlite(args.out_dir, batch_size=20_000_000, group_by_size=2_200_000_000)
+    elif args.phase == "cooc_len":
+        db_path = os.path.join(args.out_dir, "cooc_matrix_400K.db")
+        nrows = builder._get_nrows_sqlite(db_path)
+        print(f"[{datetime.now().strftime('%Y-%m-%d | %H:%M:%S')}] ✅ Number of rows in Co-occurence matrix: {nrows:,}")
     elif args.phase == "to_torch":
-        builder._sqlite_to_chunks(args.out_dir, chunk_size=args.chunk_size, save_type=".pt", sample_per_record=False)
+        builder._sqlite_to_chunks(args.out_dir, chunk_size=args.chunk_size, max_nrows= args.cooc_size, save_type=".pt", sample_per_record=False)
     elif args.phase == "to_webdata":
-        builder._sqlite_to_chunks(args.out_dir, chunk_size=args.chunk_size, save_type="webdata", sample_per_record=False)
+        builder._sqlite_to_chunks(args.out_dir, chunk_size=args.chunk_size, max_nrows= args.cooc_size, save_type="webdata", sample_per_record=False)
     else:
         raise ValueError(f"Unknown phase: {args.phase}")
     
