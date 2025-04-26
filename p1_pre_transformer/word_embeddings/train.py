@@ -33,16 +33,19 @@ def train_epoch_glove(loader, model, optimizer, scheduler, loss_fn, device = 'cp
     """
     GPU batched?
     """
+    min_loss = None
     loop = tqdm(loader, leave = True)
     for pairs, cooccurence in loop:
         if device == 'cpu' or not gpu_batched:
             pairs, cooccurence = pairs.to(device), cooccurence.to(device)
         weight, delta = model(pairs, cooccurence)
         loss = loss_fn(weight, delta)
+        if min_loss is None or min_loss > loss.item():
+            min_loss = loss.item()
         loss.backward()
         optimizer.step()
         scheduler.step()
-        loop.set_postfix(loss = loss.item()) # NOTE: Add time
+        loop.set_postfix(loss = loss.item(), min_loss=min_loss) # NOTE: Add time
     return loss.item()
 
 
