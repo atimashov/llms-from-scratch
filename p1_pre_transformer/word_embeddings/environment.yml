@@ -24,4 +24,4 @@ dependencies:
       - termcolor
 
 # For GPU install (Check appropriate Cuda version):
-# pip install torch==2.6.* --index-url https://download.pytorch.org/whl/cu124
+# pip install torch --index-url https://download.pytorch.org/whl/cu128
