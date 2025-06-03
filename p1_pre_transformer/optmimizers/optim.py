@@ -96,19 +96,33 @@ class RMSProp(Optimizer):
                 p.data -= lr * grad / torch.sqrt(g2 +1e-5)
 
 class Adam(Optimizer):
-    def __init__(self, params: Iterable[nn.Parameter], lr: float = 5e-4, beta1: float = 0.9, beta2: float = 0.999):
-        super(Adam, self).__init__(params, dict(lr=lr, beta1=beta1, beta2=beta2))
+    """
+    Adam optimizer implementation. 
+
+    Attributes:
+        lr (float): Learning rate of the optimization.
+        beta1 (float): first moment decay ratio.
+        beta2 (float): second moment decay ratio.
+        weight_decay (float): weight decay ration or L2 regularization ratio.
+        decoupled (bool): AdamW vs Adam
+    """
+    def __init__(self, params: Iterable[nn.Parameter], lr: float = 5e-4, beta1: float = 0.9, beta2: float = 0.999, weight_decay: float = 0.0, decoupled: bool = False):
+        super(Adam, self).__init__(params, dict(lr=lr, beta1=beta1, beta2=beta2, weight_decay = weight_decay, decoupled = decoupled))
 
     def step(self):
         for group in self.param_groups:
             lr = group["lr"]
             beta1 = group["beta1"]
             beta2 = group["beta2"]
+            wd = group["weight_decay"]
+            adamW = group["decoupled"]
             t = group.get("t", 1) # NOTE: should I move it not to be atatched to each group?
             for p in group["params"]:
                 # Optimizer state
                 state = self.state[p]
                 grad = p.grad.data
+                if not adamW:
+                    grad += wd * p.data
 
                 # Get params from the state
                 first_moment = state.get("first_moment", torch.zeros_like(grad))
@@ -116,25 +130,18 @@ class Adam(Optimizer):
 
                 # Update optimizer state
                 first_moment = beta1 * first_moment + (1 - beta1) * grad
-                second_moment = beta2 * second_moment + (1 - beta2) * grad * grad
+                second_moment = beta2 * second_moment + (1 - beta2) * grad ** 2
                 state["first_moment"] = first_moment
                 state["second_moment"] = second_moment
                 
                 # Update parameters
                 first_unbias = first_moment / (1 - beta1 ** t)
                 second_unbias = second_moment / (1 - beta2 ** t)
-                p.data -= lr * first_unbias / torch.sqrt(second_unbias +1e-7)
+                decoupled_wd = 0 if not adamW else wd * p.data 
+                p.data -= lr * (first_unbias / torch.sqrt(second_unbias +1e-7) + decoupled_wd)
             
             # update state of "t" (current gradient step)
             group["t"] += 1
-
-
-class AdamW(Optimizer):
-    def __init__(self, params: Iterable[nn.Parameter], lr: float = 5e-4):
-        super(AdamW, self).__init__(params, dict(lr=lr))
-
-    def step(self):
-        raise NotImplementedError("This method has not been implemented yet.")
 
 class Lion(Optimizer):
     def __init__(self, params: Iterable[nn.Parameter], lr: float = 5e-4):
