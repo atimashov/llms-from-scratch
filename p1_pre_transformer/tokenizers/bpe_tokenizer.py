@@ -11,7 +11,27 @@ import pickle
 
 class BPETokenizer:
     """
-    Working with bytes directly (not with indices)
+    Byte Pair Encoding (BPE) Tokenizer operating on raw UTF-8 bytes.
+
+    This implementation:
+    - Builds the vocabulary from raw input using a BPE merge process
+    - Operates at the byte level (instead of indices)
+    - Supports streaming and multiprocessing for encoding
+    - Supports decoding
+    - Respects special tokens (which are never split)
+    - Stores the vocabulary as: dict[int → bytes]
+
+    Args:
+        input_path (str): Path to input training corpus.
+        vocab_size (int): Total maximum vocabulary size.
+        special_tokens (list[str] | None): Tokens to preserve as-is (e.g. <|endoftext|>).
+    
+    Attributes (additional):
+        PAT (str): regex Raw string pattern.
+        cur_vsize (int): Current vocabulary size, it is required during training. 
+        vocab (dict[int, bytes]): ID-to-token mapping.
+        tokens2id (dict[bytes, int]): Reverse token lookup.
+        merges (list[tuple[bytes, bytes]]): BPE merge rules (in order).
     """
     def __init__(self, input_path: str, vocab_size: int, special_tokens: list[str] | None):
         self.input_path = input_path
@@ -43,6 +63,9 @@ class BPETokenizer:
         NOTE: part of Stanford CS336
         Chunk the file into parts that can be counted independently.
         May return fewer chunks if the boundaries end up overlapping.
+
+        Returns:
+            list[int]: File byte offsets for chunk boundaries.
         """
         # Get total file size in bytes
         file.seek(0, os.SEEK_END)
@@ -78,7 +101,12 @@ class BPETokenizer:
         return sorted(set(chunk_boundaries))
 
     def iter_split_bytes(self, data: str, pattern: re.Pattern | None):
-        """Yield (is_end, is_match, chunk) from bytes split by pattern (including matched tokens)."""
+        """
+        Split input text by a regex pattern, yielding flags for special token matches and end position.
+
+        Yields:
+            (is_end: bool, is_match: bool, chunk: str)
+        """
         # create dummy iterator
         if pattern is None:
             yield True, False, data
@@ -95,7 +123,21 @@ class BPETokenizer:
             if pos < len(data):
                 yield True, False, data[pos:]
 
-    def pretokenize_chunk(self, start: int, end: int, iterator = False):
+    def pretokenize_chunk(self, start: int, end: int):
+        """
+        Pre-tokenize a chunk of the input corpus between byte offsets [start, end).
+
+        Reads the chunk from disk, splits it by special tokens, and further each fragment
+        is represented as tuple of bytes. Each resulting pre-token (fragment) is counted.
+
+        Args:
+            start (int): Byte offset where the chunk begins.
+            end (int): Byte offset where the chunk ends.
+
+        Returns:
+            dict[tuple[bytes], int]: A dictionary mapping byte sequences (as tuples of 1-byte strings)
+            to their frequency counts within the chunk.
+        """
         with open(self.input_path, "rb") as f:
             f.seek(start)
             chunk = f.read(end - start).decode("utf-8", errors="ignore")
@@ -106,14 +148,11 @@ class BPETokenizer:
 
         # iterate over splitted chunk
         cnt_pretokens = dict() # NOTE: will Cython - based Counter improve speed?
-        my_iter = self.iter_split_bytes(chunk, comp_pat) if iterator else comp_pat.split(chunk)
-        for step in my_iter: # NOTE: probably it makes sense to implement iterator
-            if iterator:
-                st, fragm = step
-                if st:
-                    continue
-            else: 
-                fragm = step
+        my_iter = self.iter_split_bytes(chunk, comp_pat)
+        for step in my_iter:
+            _, st, fragm = step
+            if st:
+                continue
             for pretoken in re.finditer(self.PAT, fragm):
                 b = pretoken.group().encode("utf-8")
                 utf8_bytes = tuple(b[i:i+1] for i in range(len(b)))
@@ -121,13 +160,25 @@ class BPETokenizer:
                 cnt_pretokens[utf8_bytes] = cnt_pretokens.get(utf8_bytes, 0) + 1
         return cnt_pretokens
 
-    def pretokenize(self, num_processes = 24, iterator = False):
+    def pretokenize(self, num_processes = 24):
+        """
+        Pre-tokenize the entire corpus in parallel using byte chunking.
+
+        The file is divided into chunks using `find_chunk_boundaries`, ensuring that special tokens
+        are not split across chunks. Each chunk is processed in parallel using `pretokenize_chunk`.
+
+        The final result is a frequency list of all UTF-8 byte sequences (pre-tokens), stored in:
+            self.cnt_pretokens: list[tuple[tuple[bytes], int]]
+
+        Args:
+            num_processes (int): Number of worker processes to use.
+        """
         with open(self.input_path, "rb") as f:
             boundaries = self.find_chunk_boundaries(f, num_processes)
 
             params = []
             for start, end in zip(boundaries[:-1], boundaries[1:]):
-                params.append((start, end, iterator))
+                params.append((start, end))
 
         # run pretokenizer for chunks in parallel # NOTE: probably it makes sense to adjust num_processes in Pool?
         with Pool(num_processes) as p:
@@ -143,8 +194,12 @@ class BPETokenizer:
     def init_pairs(self):
         """
         Initialize 
-        - pairs counter:   pair -> number of occurences
-        - pairs positions: pair -> idx of pretoken -> list of start indices inside pretoken
+            pairs counter (dict[(bytes, bytes), int]):   pair -> number of occurences
+            pairs positions (dict[int, list[int]]): pair -> idx of pretoken -> list of start indices inside pretoken
+
+        Returns:
+            pairs_cnt: dict[(bytes, bytes), int]
+            pairs_pos: dict[int, list[int]]
         """
         self.pairs_cnt, self.pairs_pos = dict(), dict()
         for i_pretoken, (pretokens_tuple, occur) in enumerate(self.cnt_pretokens):
@@ -167,6 +222,15 @@ class BPETokenizer:
         return self.pairs_cnt, self.pairs_pos
 
     def update_pretoken(self, pair: tuple, pretoken_idx: int):
+        """
+        Apply merge to a specific pretoken, modifying token list in-place.
+        Args:
+            pair (tuple(bytes, bytes)): pair of bytes to merge
+            pretoken_idx: index of pre-token to merge
+        
+        Returns:
+            tuple(bytes): Previous version of pre-tokens
+        """
         positions = self.pairs_pos[pair][pretoken_idx]
         pretokens, occur = self.cnt_pretokens[pretoken_idx]
                  
@@ -182,6 +246,11 @@ class BPETokenizer:
 
     def update_pairs(self, pretoken_idx: int, pretokens_old: tuple):
         """
+        Update pair counts and pair positions after modifying a specific pretoken.
+
+        Args:
+            pretoken_idx (int): Index of the modified pretoken.
+            pretokens_old (tuple): Original pretoken before modification.
         """
         pretokens, occur = self.cnt_pretokens[pretoken_idx]
         for pos in range(len(pretokens_old) - 1):
@@ -209,6 +278,16 @@ class BPETokenizer:
             prev_pair = pair # to avoid duplicating the same pair (f.i. rrrrrrrr)
 
     def train_step(self):
+        """
+        Run one merge step of BPE:
+            1. Find most frequent pair
+            2. Merge across pretoken list
+            3. Update vocab and merge list
+
+        Returns:
+            tuple(bytes): pair of bytes that we merged 
+            int: number of appearences of this pair in the corpus
+        """
         best_pair, best_pair_cnt = max(self.pairs_cnt.items(), key=lambda x: (x[1], x[0]))
         # update merges
         self.merges.append(best_pair)
@@ -225,6 +304,12 @@ class BPETokenizer:
 
 
     def train(self, num_processes: int = 24):
+        """
+        Train BPE merges until vocab_size is reached.
+
+        Args:
+            num_processes (int): Number of processes for parallel pretokenization.
+        """
         if not hasattr(self, "cnt_pretokens"):
             t = perf_counter()
             self.pretokenize(num_processes)
@@ -241,8 +326,13 @@ class BPETokenizer:
     def from_files(self, vocab_path: str, merges_path: str):
         """
         Construct the following from a serialized objects (pickle):
-            - self.vocab: dict[int, bytes]
-            - self.merges: list[(bytes, bytes)]
+            - vocab: dict[int, bytes]
+            - tokens2id: dict[bytes, int]
+            - merges: list[(bytes, bytes)]
+
+        Args:
+            vocab_path (str): A path to the Vocabulary file.
+            merges_path (str): A path to the Merges file.
         """
         # deserialize vocab
         with open(vocab_path, "rb") as f:
@@ -261,18 +351,26 @@ class BPETokenizer:
         Serialize 
             - Vocab
             - Merges
+
+        Args:
+            folder_path (str): A path to the folder where we want to save vocabulary and list of merges. 
         """
         # Serialize vocab
         with open(Path(folder_path) / "vocab.pkl", "wb") as f:
             pickle.dump(self.vocab, f)
         # Serialize merges
         with open(Path(folder_path) / "merges.pkl", "wb") as f:
-            pickle.dump(self.vocab, f)
+            pickle.dump(self.merges, f)
     
     def encode_pretoken(self, pretoken: str):
         """
-        Get ids
-        NOTE: probably, not optimal
+        Encode a single pre-token into BPE IDs using current merge rules.
+
+        Args:
+            pretoken (str): A Unicode string token.
+
+        Returns:
+            list[int]: Token IDs after applying merges.
         """
         # create initial list of bytes
         b = pretoken.encode("utf-8")
@@ -289,6 +387,16 @@ class BPETokenizer:
 
 
     def encode(self, text: str, num_processes: int = 24) -> list[int | bytes]:
+        """
+        Encode a full text string to a list of token IDs.
+
+        Args:
+            text (str): Input text to tokenize.
+            num_processes (int): Parallelism level for pretoken encoding.
+
+        Returns:
+            list[int]: Token IDs after applying merges.
+        """
         # compile special tokens pattern
         if self.special_tokens:
             st_pat = "(" + "|".join(map(re.escape, self.special_tokens)) + ")"
@@ -318,7 +426,16 @@ class BPETokenizer:
     
     def encode_iterable(self, iterable: Iterator[str], num_processes: int = 1) -> Iterator[int]:
         """
-        NOTE: num_processes = 1 to avoid large memory usage 
+        Streamingly encode an iterable of text chunks into token IDs.
+        Trade-off: 
+            If we use multiprocessing, it will be faster, but we will use more RAM.
+
+        Args:
+            iterable (Iterator[str]): Stream of text input chunks.
+            num_processes (int): Use multiprocessing if > 1. Otherwise process tokens in-place.
+
+        Yields:
+            int: Token IDs one-by-one.
         """
         #  special tokens pattern
         if self.special_tokens:
@@ -364,7 +481,13 @@ class BPETokenizer:
 
     def decode(self, ids: list[int]) -> str:
         """
-        Decode list of ids to string
+        Decode a list of token IDs into a UTF-8 string.
+
+        Args:
+            ids (list[int]): Token ID sequence.
+
+        Returns:
+            str: Decoded string.
         """
         byte_seq = b"".join([self.vocab[i] for i in ids])
         text = byte_seq.decode("utf-8", errors="replace")
@@ -375,58 +498,39 @@ if __name__ == "__main__":
     parser.add_argument("--input-path", type = str, default=str(Path.cwd().parents[2] / "data" / "TinyStoriesV2-GPT4-train.txt"))
     parser.add_argument("--vocab-size", type = int, default = 10_000)
     parser.add_argument("--num-processes", type = int, default = 24)
-    parser.add_argument("--special-tokens", nargs = "+", type = int, default = ["<|endoftext|>"], help = "List of special tokens")
+    parser.add_argument("--special-tokens", nargs = "+", type = str, default = ["<|endoftext|>"], help = "List of special tokens")
     args = parser.parse_args()
 
-    # bpe = BPETokenizer(input_path = args.input_path, vocab_size = args.vocab_size, special_tokens = args.special_tokens)
-    # bpe.train(args.num_processes)
-    # print(len(bpe.vocab))
-    # print(bpe.cnt_pretokens[:3])
-
-    # for i in range(10):
-    #     t = perf_counter()
-    #     bpe = BPETokenizer2(input_path = args.input_path, vocab_size = args.vocab_size, special_tokens = args.special_tokens)
-    #     t = perf_counter()
-    #     bpe.pretokenize(test = i % 2 == 0)
-    #     print(f"⏱️ Pretokenized {i}: time={perf_counter() - t:.2f}s")
-
-    # bpe.train(args.num_processes)
     bpe = BPETokenizer(input_path = args.input_path, vocab_size = args.vocab_size, special_tokens = args.special_tokens)
 
 
     t = perf_counter()
-    bpe.pretokenize(iterator = False)
+    bpe.pretokenize()
     print(f"⏱️ Pretokenized: time={perf_counter() - t:.2f}s") 
 
     bpe.train()
 
-    t = perf_counter()
-    text = "Sasha Loves Hosana<|endoftext|> Hosana loves sasha<|endoftext|>"
+    # simple text input
+    test_text = "Sasha Likes Capybaras<|endoftext|> capybaras like sasha<|endoftext|>"
 
-    ids_encoded, bytes_encoded = bpe.encode(text)
-    print(ids_encoded)
-    print(bytes_encoded)
+    t = perf_counter()
+    ids = bpe.encode(test_text)
+    print("Encoded IDs:", ids)
     print(f"⏱️ Encoded: time={perf_counter() - t:.2f}s") 
 
-
     t = perf_counter()
-    text_output = bpe.decode(ids_encoded)
-    print(text_output)
+    decoded = bpe.decode(ids)
+    print("Decoded Text:", decoded)
     print(f"⏱️ Decoded: time={perf_counter() - t:.2f}s") 
 
-    text_iter = (x for x in ["Sasha Loves Hosana<|endoftext|> Hosana lo", "ves sasha<|endoftext|>"])
-    print(type(text_iter))
+    print("\n--- Streaming encoding test ---")
+    text_iter = iter([
+        "Sasha Likes Capybaras<|endoftext|> capybaras li",
+        "ke sasha<|endoftext|>"
+    ])
     t = perf_counter()
-    iter_ints = bpe.encode_iterable(text_iter)
+    iter = list(bpe.encode_iterable(text_iter))
+    print("Streamed IDs:")
+    for streamed_id in iter:
+        print(streamed_id)
     print(f"⏱️ Encoded iter: time={perf_counter() - t:.2f}s")
-
-    # Encoding empty string
-    ids_encoded, bytes_encoded = bpe.encode("")
-    print(ids_encoded)
-    print(bytes_encoded)
-    print(f"⏱️ Encoded: time={perf_counter() - t:.2f}s") 
-
-    t = perf_counter()
-    text_output = bpe.decode(ids_encoded)
-    print(text_output)
-    print(f"⏱️ Decoded: time={perf_counter() - t:.2f}s") 
