@@ -195,7 +195,7 @@ class BPETokenizer:
         """
         Initialize 
             pairs counter (dict[(bytes, bytes), int]):   pair -> number of occurences
-            pairs positions (dict[int, list[int]]): pair -> idx of pretoken -> list of start indices inside pretoken
+            pairs positions (dict[(bytes, bytes), dict[int, list[int]]]): pair -> idx of pretoken -> list of start indices inside pretoken
 
         Returns:
             pairs_cnt: dict[(bytes, bytes), int]
