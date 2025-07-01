@@ -203,14 +203,14 @@ class BPETokenizer:
         """
         self.pairs_cnt, self.pairs_pos = dict(), dict()
         for i_pretoken, (pretokens_tuple, occur) in enumerate(self.cnt_pretokens):
-            prev_pair = None # to avoid duplicating the same pair (f.i. rrrrrrrr)
+            prev_pair = None # to avoid duplicating the same pair (e.g. rrrrrrrr)
             for i_pos in range(len(pretokens_tuple) - 1):
                 pair = pretokens_tuple[i_pos:(i_pos + 2)]
                 # update pairs counter
                 self.pairs_cnt[pair] = self.pairs_cnt.get(pair, 0) + occur
                                 
                 # update pairs positions
-                if pair == prev_pair:  # to avoid duplicating the same pair (f.i. rrrrrrrr)
+                if pair == prev_pair:  # to avoid duplicating the same pair (e.g. rrrrrrrr)
                     prev_pair = None
                     continue
                 if pair not in self.pairs_pos:
@@ -218,7 +218,7 @@ class BPETokenizer:
                 if i_pretoken not in self.pairs_pos[pair]:
                     self.pairs_pos[pair][i_pretoken] = []
                 self.pairs_pos[pair][i_pretoken].append(i_pos)
-                prev_pair = pair  # to avoid duplicating the same pair (f.i. rrrrrrrr)
+                prev_pair = pair  # to avoid duplicating the same pair (e.g. rrrrrrrr)
         return self.pairs_cnt, self.pairs_pos
 
     def update_pretoken(self, pair: tuple, pretoken_idx: int):
@@ -262,11 +262,11 @@ class BPETokenizer:
             if self.pairs_cnt[pair] == 0:
                 del self.pairs_cnt[pair]
 
-        prev_pair = None # to avoid duplicating the same pair (f.i. rrrrrrrr)
+        prev_pair = None # to avoid duplicating the same pair (e.g. rrrrrrrr)
         for pos in range(len(pretokens) - 1):
             pair = tuple(pretokens[pos:(pos+2)])
             self.pairs_cnt[pair] = self.pairs_cnt.get(pair, 0) + occur
-            if pair == prev_pair: # to avoid duplicating the same pair (f.i. rrrrrrrr)
+            if pair == prev_pair: # to avoid duplicating the same pair (e.g. rrrrrrrr)
                 prev_pair = None
                 continue
             if pair not in self.pairs_pos:
@@ -275,7 +275,7 @@ class BPETokenizer:
                 self.pairs_pos[pair][pretoken_idx] = []
             self.pairs_pos[pair][pretoken_idx].append(pos)
             
-            prev_pair = pair # to avoid duplicating the same pair (f.i. rrrrrrrr)
+            prev_pair = pair # to avoid duplicating the same pair (e.g. rrrrrrrr)
 
     def train_step(self):
         """
