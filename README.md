@@ -18,4 +18,4 @@ In this repo, I implement foundational and cutting-edge papers in NLP, from clas
 This repo builds upon:
 - 📘 [CS224N – NLP with Deep Learning (Stanford)](https://web.stanford.edu/class/cs224n/)
 - 📘 [CS336 – Large Language Models (Stanford)](https://stanford-cs336.github.io/)
-- 📺 [Karpathy – Neural Networks: Zero to Hero](https://www.youtube.com/@karpathy)
+- 📺 [Karpathy – Neural Networks: Zero to Hero](https://www.youtube.com/watch?v=VMj-3S1tku0&list=PLAqhIrjkxbuWI23v9cThsA9GvCAUhRvKZ)
