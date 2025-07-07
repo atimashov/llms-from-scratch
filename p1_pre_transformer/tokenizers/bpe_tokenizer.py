@@ -241,7 +241,7 @@ class BPETokenizer:
             prev = curr + 2
         if prev < len(pretokens):
             new_tokens.extend(list(pretokens[prev:]))
-        self.cnt_pretokens[pretoken_idx] = tuple(new_tokens), occur # NOTE: do I need to move to tuple?
+        self.cnt_pretokens[pretoken_idx] = tuple(new_tokens), occur
         return pretokens
 
     def update_pairs(self, pretoken_idx: int, pretokens_old: tuple):
@@ -505,7 +505,7 @@ if __name__ == "__main__":
 
 
     t = perf_counter()
-    bpe.pretokenize()
+    bpe.pretokenize(args.num_processes)
     print(f"⏱️ Pretokenized: time={perf_counter() - t:.2f}s") 
 
     bpe.train()
