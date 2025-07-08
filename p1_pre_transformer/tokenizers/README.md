@@ -19,6 +19,6 @@ conda activate llms
 ### Run BPE tokenizer test
 ``` sh
 cd p1_pre_transformer/tokenizers/
-python bpe_tokenizer.py --num-processes
+python bpe_tokenizer.py --num-processes 1
 ```
 Be careful with `--num-processes` and `--input-path` variables.
