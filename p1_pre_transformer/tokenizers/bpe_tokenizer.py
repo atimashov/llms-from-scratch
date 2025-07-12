@@ -180,7 +180,7 @@ class BPETokenizer:
             for start, end in zip(boundaries[:-1], boundaries[1:]):
                 params.append((start, end))
 
-        # run pretokenizer for chunks in parallel
+        # run pretokenizer for chunks in parallel # NOTE: probably it makes sense to adjust num_processes (to match real cores) in Pool?
         with Pool(num_processes) as p:
             counters = p.starmap(self.pretokenize_chunk, params)
             
