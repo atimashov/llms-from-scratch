@@ -4,7 +4,7 @@ from einops import rearrange, einsum
 
 
 def softmax(x: torch.Tensor, dim: int) -> torch.Tensor:
-    assert 0 <= dim < x.dim()
+    assert -x.dim() <= dim < x.dim()
     x_max = x.max(dim=dim, keepdim=True).values
     exps = torch.exp(x - x_max)
     return exps / torch.sum(exps, dim = dim, keepdim=True)
@@ -20,5 +20,5 @@ def scaled_dot_product_attention(Q: torch.Tensor, K: torch.Tensor, V: torch.Tens
     if mask is not None:
         scores = scores.masked_fill(~mask, float('-inf'))
     weights = softmax(scores / (d_k ** 0.5), dim = -1)
-    att = einsum(weights, V, "... seq_len seq_len2, ... seq_len2 d_v -> ... seq_len, d_v")
+    att = einsum(weights, V, "... seq_len seq_len2, ... seq_len2 d_v -> ... seq_len d_v")
     return att

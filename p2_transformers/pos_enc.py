@@ -9,18 +9,22 @@ class RoPE(nn.Module):
         assert d_k % 2 ==0
         self.d_k = d_k
         # rotate over even indices        
-        position = torch.arange(max_seq_len, dtype = dtype)
-        inv_freq = 1.0 / (theta ** (torch.arange(1, d_k+1, 2).float() / d_k)) # NOTE: clarify if I should start from 0
+        position = torch.arange(max_seq_len, dtype=dtype, device=device)
+        inv_freq = 1.0 / (theta ** (torch.arange(0, d_k, 2).float() / d_k))
+
         emb = einsum(position, inv_freq, "max_seq_len, half_d_k -> max_seq_len half_d_k")
         # register sin and cos  
         self.register_buffer("sin", torch.sin(emb), persistent=False)
         self.register_buffer("cos", torch.cos(emb), persistent=False)
 
-    def forward(self, x: torch.Tensor, token_positions: torch.Tensor | None) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, token_positions: torch.Tensor | None = None) -> torch.Tensor:
         assert x.shape[-1] == self.d_k
         # choose right positions
-        sin = self.sin[token_positions] if token_positions else self.sin
-        cos = self.cos[token_positions] if token_positions else self.cos
+        if token_positions is None:
+            token_positions = torch.arange(x.shape[-2])
+            token_positions = token_positions.to(self.sin.device)
+        sin = self.sin[token_positions]
+        cos = self.cos[token_positions]
         # split x on odd and even
         x1 = x[..., 0::2]
         x2 = x[..., 1::2]
@@ -28,7 +32,7 @@ class RoPE(nn.Module):
         rot_x1 = x1 * cos - x2 * sin
         rot_x2 = x1 * sin + x2 * cos
         # calculate output
-        x_out = torch.zeros_like(x)
+        x_out = torch.empty_like(x) # torch.zeros_like(x) is slower in theory
         x_out[..., 0::2] = rot_x1
         x_out[..., 1::2] = rot_x2
         return x_out

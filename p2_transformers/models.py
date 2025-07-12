@@ -47,7 +47,7 @@ class Embedding(nn.Module):
         self.emb = nn.Parameter(data)
 
     def forward(self, token_ids: torch.Tensor) -> torch.Tensor:
-        return self.emb[token_ids]        
+        return self.emb[token_ids]       
 
 class SwiGLUFFN(nn.Module):
     def __init__(self, d_model: int, d_hidden: int, device: torch.device | None = None, dtype: torch.dtype | None = None):
@@ -89,7 +89,7 @@ class MultiHeadSelfAttention(nn.Module):
         # init RoPE
         self.rope = RoPE(theta = theta, d_k = self.d_k, max_seq_len= context_length, device=device, dtype = dtype)
 
-    def forward(self, x: torch.Tensor, is_masked: bool = True):
+    def forward(self, x: torch.Tensor, is_masked: bool = True, with_rope = True, token_positions = None):
         # project x to get queries, keys and values
         Q = einsum(x, self.P_Q, "... d, hd_k d -> ... hd_k") # unplug
         Q = rearrange(Q, "... seq_len (h d_k) -> ... h seq_len d_k", h = self.num_heads)
@@ -98,11 +98,12 @@ class MultiHeadSelfAttention(nn.Module):
         V = einsum(x, self.P_V, "... d, hd_v d -> ... hd_v")
         V = rearrange(V, "...  seq_len (h d_v) -> ... h seq_len d_v", h = self.num_heads)
         # apply RoPE
-        Q = self.rope(Q)
-        K = self.rope(K)
+        if with_rope:
+            Q = self.rope(Q)
+            K = self.rope(K)
         # create mask
         if is_masked:
-            mask = ~torch.triu(torch.full((Q.shape[-1], K.shape[-1]), True), diagonal=1)
+            mask = ~torch.triu(torch.full((Q.shape[-2], K.shape[-2]), True), diagonal=1)
         else:
             mask = None
         # calculate scaled attention
@@ -120,15 +121,16 @@ class Transformer(nn.Module):
     """
     def __init__(self, d_model: int, num_heads: int, d_ff: int, theta: float = 10000.0, context_length = 10000, device: torch.device | None = None, dtype: torch.dtype | None = None):
         super().__init__()
-        self.rmsnorm = RMSNorm(d_model=d_model, device=device, dtype=dtype)
-        self.mh_self_attn = MultiHeadSelfAttention(d_model = d_model, num_heads = num_heads, theta = theta, context_length = context_length, device = device, dtype = dtype)
-        self.ff = SwiGLUFFN(d_model = d_model, d_hidden = d_ff, device = device, dtype = dtype)
+        self.ln1 = RMSNorm(d_model=d_model, device=device, dtype=dtype)
+        self.ln2 = RMSNorm(d_model=d_model, device=device, dtype=dtype)
+        self.attn = MultiHeadSelfAttention(d_model = d_model, num_heads = num_heads, theta = theta, context_length = context_length, device = device, dtype = dtype)
+        self.ffn = SwiGLUFFN(d_model = d_model, d_hidden = d_ff, device = device, dtype = dtype)
 
     def forward(self, x: torch.Tensor):
         # apply the first block (Multi Head Self Attention)
-        y = x + self.mh_self_attn(self.rmsnorm(x))
+        y = x + self.attn(self.ln1(x))
         # apply the first block (Feed Forward)
-        return y + self.ff(self.rmsnorm(y))
+        return y + self.ffn(self.ln2(y))
     
 class TransformerLM(nn.Module):
     """
@@ -140,18 +142,18 @@ class TransformerLM(nn.Module):
     """
     def __init__(self, d_model: int, num_heads: int, d_ff: int, theta: float = 10000.0, context_length = 256, num_layers:int = 6, vocab_size: int = 10_000, device: torch.device | None = None, dtype: torch.dtype | None = None):
         super().__init__()
-        self.emb = Embedding(num_embeddings=vocab_size,embedding_dim=d_model)
-        self.transformers = nn.Sequential(
+        self.token_embeddings = Embedding(num_embeddings=vocab_size,embedding_dim=d_model)
+        self.layers = nn.Sequential(
             *[Transformer(d_model = d_model, num_heads = num_heads, d_ff = d_ff, theta = theta, context_length = context_length, device =device, dtype = dtype) for _ in range(num_layers)]
         )
-        self.rmsnorm = RMSNorm(d_model=d_model, device=device, dtype=dtype)
-        self.head = Linear(d_model, vocab_size, device=device,dtype=dtype)
+        self.ln_final = RMSNorm(d_model=d_model, device=device, dtype=dtype)
+        self.lm_head = Linear(d_model, vocab_size, device=device,dtype=dtype)
     
     def forward(self, token_ids, prob = False):
-        x = self.emb(token_ids)
-        x = self.transformers(x)
-        x = self.rmsnorm(x)
-        logits = self.head(x)
+        x = self.token_embeddings(token_ids)
+        x = self.layers(x)
+        x = self.ln_final(x)
+        logits = self.lm_head(x)
         if not prob:
             return logits
         probs = softmax(logits, dim= -1)
