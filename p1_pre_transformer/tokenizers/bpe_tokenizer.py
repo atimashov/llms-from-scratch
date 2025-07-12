@@ -180,7 +180,7 @@ class BPETokenizer:
             for start, end in zip(boundaries[:-1], boundaries[1:]):
                 params.append((start, end))
 
-        # run pretokenizer for chunks in parallel # NOTE: probably it makes sense to adjust num_processes in Pool?
+        # run pretokenizer for chunks in parallel
         with Pool(num_processes) as p:
             counters = p.starmap(self.pretokenize_chunk, params)
             
@@ -199,7 +199,7 @@ class BPETokenizer:
 
         Returns:
             pairs_cnt: dict[(bytes, bytes), int]
-            pairs_pos: dict[int, list[int]]
+            pairs_pos: dict[(bytes, bytes), dict[int, list[int]]]
         """
         self.pairs_cnt, self.pairs_pos = dict(), dict()
         for i_pretoken, (pretokens_tuple, occur) in enumerate(self.cnt_pretokens):
@@ -344,7 +344,6 @@ class BPETokenizer:
         # deserialize merges
         with open(merges_path, "rb") as f:
             self.merges = pickle.load(f)
-
 
     def save_files(self, folder_path: str):
         """
@@ -492,6 +491,7 @@ class BPETokenizer:
         byte_seq = b"".join([self.vocab[i] for i in ids])
         text = byte_seq.decode("utf-8", errors="replace")
         return text
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="BPE tokenizer trainer")
