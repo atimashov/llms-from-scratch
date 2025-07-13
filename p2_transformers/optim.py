@@ -1,35 +1,49 @@
 from torch import nn
 from torch.optim import Optimizer
-
+from collections.abc import Callable, Iterable
+import math
 
 
 class VanillaGD(Optimizer):
     def __init__(self, params: Iterable[nn.Parameter], lr: float = 0.01):
-        super(VanillaGD, self).__init__(params, dict(lr=lr))
+        if lr < 0:
+            raise ValueError(f"Invalid learning rate: {lr}")
+        super().__init__(params, dict(lr=lr))
 
-    def step(self):
+    def step(self, closure: Callable | None = None):
+        # NOTE: "closure" not necessary for classic SGD, but can be used for optimizers requiring multiple loss/grad calculations per step (e.g. LBFGS)
+        loss = None if closure is None else closure() 
         for group in self.param_groups:
             lr = group["lr"]
             for p in group["params"]:
+                if p.grad is None:
+                    continue
                 # Optimizer state
                 state = self.state[p]
                 grad = p.grad.data
 
                 # Update parameters
                 p.data -= lr * grad
+        return loss
+
 
 class GDMomentum(Optimizer):
     def __init__(self, params: Iterable[nn.Parameter], lr: float = 0.01, rho: float = 0.99, nesterov: bool = False):
-        super(GDMomentum, self).__init__(params, dict(lr=lr, rho = rho, nesterov = nesterov))
+        if lr < 0:
+            raise ValueError(f"Invalid learning rate: {lr}")
+        super().__init__(params, dict(lr=lr, rho = rho, nesterov = nesterov))
 
-    def step(self):
+    def step(self, closure: Callable | None = None):
         # TODO: add "Nesterov" case
+        loss = None if closure is None else closure() 
         for group in self.param_groups:
             lr = group["lr"]
             rho = group["rho"]
             nesterov = group["nesterov"]
 
             for p in group["params"]:
+                if p.grad is None:
+                    continue
                 # Optimizer state
                 state = self.state[p]
                 grad = p.grad.data
@@ -49,15 +63,21 @@ class GDMomentum(Optimizer):
                     p.data += -rho * old_v + (1 + rho) * v
                 else:
                     p.data -= lr * v
+        return loss
 
 class AdaGrad(Optimizer):
     def __init__(self, params: Iterable[nn.Parameter], lr: float = 0.01):
-        super(AdaGrad, self).__init__(params, dict(lr=lr))
+        if lr < 0:
+            raise ValueError(f"Invalid learning rate: {lr}")
+        super().__init__(params, dict(lr=lr))
 
-    def step(self):
+    def step(self, closure: Callable | None = None):
+        loss = None if closure is None else closure() 
         for group in self.param_groups:
             lr = group["lr"]
             for p in group["params"]:
+                if p.grad is None:
+                    continue
                 # Optimizer state
                 state = self.state[p]
                 grad = p.grad.data
@@ -71,16 +91,22 @@ class AdaGrad(Optimizer):
 
                 # Update parameters
                 p.data -= lr * grad / torch.sqrt(g2 +1e-5)
+        return loss
 
 class RMSProp(Optimizer):
     def __init__(self, params: Iterable[nn.Parameter], lr: float = 0.01, decay_rate: float = 0.99):
-        super(RMSProp, self).__init__(params, dict(lr=lr, decay_rate=decay_rate))
+        if lr < 0:
+            raise ValueError(f"Invalid learning rate: {lr}")
+        super().__init__(params, dict(lr=lr, decay_rate=decay_rate))
 
-    def step(self):
+    def step(self, closure: Callable | None = None):
+        loss = None if closure is None else closure() 
         for group in self.param_groups:
             lr = group["lr"]
             decay_rate = group["decay_rate"]
             for p in group["params"]:
+                if p.grad is None:
+                    continue
                 # Optimizer state
                 state = self.state[p]
                 grad = p.grad.data
@@ -94,6 +120,8 @@ class RMSProp(Optimizer):
 
                 # Update parameters
                 p.data -= lr * grad / torch.sqrt(g2 +1e-5)
+        return loss
+
 
 class Adam(Optimizer):
     """
@@ -106,20 +134,26 @@ class Adam(Optimizer):
         weight_decay (float): weight decay ration or L2 regularization ratio.
         decoupled (bool): AdamW vs Adam
     """
-    def __init__(self, params: Iterable[nn.Parameter], lr: float = 5e-4, beta1: float = 0.9, beta2: float = 0.999, weight_decay: float = 0.0, decoupled: bool = False):
-        super(Adam, self).__init__(params, dict(lr=lr, beta1=beta1, beta2=beta2, weight_decay = weight_decay, decoupled = decoupled))
+    def __init__(self, params: Iterable[nn.Parameter], lr: float = 5e-4, betas: tuple = (0.9, 0.999), weight_decay: float = 0.0, eps: float = 1e-8, decoupled: bool = True):
+        assert lr > 0, f"Invalid learning rate: {lr}"
+        assert len(betas) == 2, f"Invalid betas: {betas}"
+        super().__init__(params, dict(lr=lr, betas=betas, weight_decay = weight_decay, eps = eps, decoupled = decoupled))
 
-    def step(self):
+    def step(self, closure: Callable | None = None):
+        loss = None if closure is None else closure() 
         for group in self.param_groups:
             lr = group["lr"]
-            beta1 = group["beta1"]
-            beta2 = group["beta2"]
+            beta1, beta2 = group["betas"]
             wd = group["weight_decay"]
             adamW = group["decoupled"]
-            t = group.get("t", 1) # NOTE: should I move it not to be atatched to each group?
+            eps = group["eps"]
+
             for p in group["params"]:
+                if p.grad is None:
+                    continue
                 # Optimizer state
                 state = self.state[p]
+                t = state.get("t", 1)
                 grad = p.grad.data
                 if not adamW:
                     grad += wd * p.data
@@ -138,37 +172,47 @@ class Adam(Optimizer):
                 first_unbias = first_moment / (1 - beta1 ** t)
                 second_unbias = second_moment / (1 - beta2 ** t)
                 decoupled_wd = 0 if not adamW else wd * p.data 
-                p.data -= lr * (first_unbias / torch.sqrt(second_unbias +1e-7) + decoupled_wd)
+                p.data -= lr * (first_unbias / torch.sqrt(second_unbias + eps) + decoupled_wd)
             
-            # update state of "t" (current gradient step)
-            group["t"] += 1
+                # update state of "t" (current gradient step)
+                state["t"] = t + 1
+        return loss
+
 
 class Lion(Optimizer):
     def __init__(self, params: Iterable[nn.Parameter], lr: float = 5e-4):
-        super(Lion, self).__init__(params, dict(lr=lr))
+        if lr < 0:
+            raise ValueError(f"Invalid learning rate: {lr}")
+        super().__init__(params, dict(lr=lr))
 
-    def step(self):
+    def step(self, closure: Callable | None = None):
         raise NotImplementedError("This method has not been implemented yet.")
 
 class Adan(Optimizer):
     def __init__(self, params: Iterable[nn.Parameter], lr: float = 5e-4):
-        super(Adan, self).__init__(params, dict(lr=lr))
+        if lr < 0:
+            raise ValueError(f"Invalid learning rate: {lr}")
+        super().__init__(params, dict(lr=lr))
 
-    def step(self):
+    def step(self, closure: Callable | None = None):
         raise NotImplementedError("This method has not been implemented yet.")
 
 class AdaFactor(Optimizer):
     def __init__(self, params: Iterable[nn.Parameter], lr: float = 5e-4):
-        super(AdaFactor, self).__init__(params, dict(lr=lr))
+        if lr < 0:
+            raise ValueError(f"Invalid learning rate: {lr}")
+        super().__init__(params, dict(lr=lr))
 
-    def step(self):
+    def step(self, closure: Callable | None = None):
         raise NotImplementedError("This method has not been implemented yet.")
 
 class Lamb(Optimizer):
     def __init__(self, params: Iterable[nn.Parameter], lr: float = 5e-4):
-        super(Lamb, self).__init__(params, dict(lr=lr))
+        if lr < 0:
+            raise ValueError(f"Invalid learning rate: {lr}")
+        super().__init__(params, dict(lr=lr))
 
-    def step(self):
+    def step(self, closure: Callable | None = None):
         raise NotImplementedError("This method has not been implemented yet.")
 
 
