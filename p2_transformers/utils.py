@@ -1,6 +1,7 @@
 import torch
 from torch import nn
 from einops import rearrange, einsum
+import numpy.typing as npt
 
 
 def softmax(x: torch.Tensor, dim: int) -> torch.Tensor:
