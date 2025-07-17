@@ -71,7 +71,7 @@ def gradient_clipping(params: list, max_l2_norm: float, eps: float = 1e-6):
 def data_loading(x: npt.NDArray, batch_size: int, context_length: int, device: torch.device | None = None) -> (torch.Tensor, torch.Tensor):
     # TODO: clarify notes about np.memmap
     # create masks to sample from numpy
-    start_seqs = random.randint(0, x.shape[0] - context_length, size=batch_size)[:, None] # NOTE: change high
+    start_seqs = random.randint(0, x.shape[0] - context_length, size=batch_size)[:, None]
     steps_curr = np.arange(context_length)[None, :]
     steps_next = np.arange(1, context_length + 1)[None, :]
     mask_curr, mask_next = start_seqs + steps_curr, start_seqs + steps_next
@@ -82,3 +82,18 @@ def data_loading(x: npt.NDArray, batch_size: int, context_length: int, device: t
     tokens_curr = torch.from_numpy(tokens_curr_np).to(device)
     tokens_next = torch.from_numpy(tokens_next_np).to(device)
     return tokens_curr, tokens_next
+
+def save_checkpoint(model, optimizer, iteration, out):
+    obj = {
+        "model": model.state_dict(),
+        "optimizer": optimizer.state_dict(),
+        "iter_number": iteration
+    }
+    torch.save(obj, out)
+
+def load_checkpoint(src, model, optimizer):
+    obj = torch.load(src)
+    # load state dicts
+    model.load_state_dict(obj["model"])
+    optimizer.load_state_dict(obj["optimizer"])
+    return obj["iter_number"]

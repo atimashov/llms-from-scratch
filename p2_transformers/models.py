@@ -140,7 +140,7 @@ class TransformerLM(nn.Module):
     the position embedding matrix.
     num_layers: int The number of Transformer blocks to use.
     """
-    def __init__(self, d_model: int, num_heads: int, d_ff: int, theta: float = 10000.0, context_length = 256, num_layers:int = 6, vocab_size: int = 10_000, device: torch.device | None = None, dtype: torch.dtype | None = None):
+    def __init__(self, d_model: int, d_ff: int, num_heads: int, num_layers:int = 6, theta: float = 10000.0, context_length = 256, vocab_size: int = 10_000, device: torch.device | None = None, dtype: torch.dtype | None = None):
         super().__init__()
         self.token_embeddings = Embedding(num_embeddings=vocab_size,embedding_dim=d_model)
         self.layers = nn.Sequential(

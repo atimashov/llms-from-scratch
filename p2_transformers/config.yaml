@@ -1,0 +1,34 @@
+seed: 123
+dataset_path: 
+  raw: '~/ai_projects/data/TinyStoriesV2-GPT4-train.txt'
+  tokenized: None
+gpu: 0
+model:
+  vocab_size: 10_000
+  context_length: 256
+  d_model: 512 # 768 (dimensions used in many small Transformer papers)
+  d_ff: 1344 # ~8/3 d_model; 64x, which is good for GPU performance.
+  rope_theta: 10_000
+  num_layers: 4
+  num_heads: 16 # 17M non-embedding parameters
+  dtype: float32
+optimizer:
+  name: 'AdamW'
+  lr: 1e-3 # 2e-5 - 5e-5
+  beta1: 0.9
+  beta2: 0.999
+  epsilon: 1e-8
+  weight_decay: 0.01
+  scheduler:
+    name: cosine
+    lr_min: 1e-6
+    warmup_iters: 0.1
+    cosine_cycle_iters: 1.0
+train:
+  total_tokens_processed: 327_680_000 # batch_size x step_count x context_length
+  batch_size: 64
+save_model:
+  path: "weights"
+  steps_freq: 1000
+load_model:
+  path: None
