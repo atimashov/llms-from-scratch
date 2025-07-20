@@ -10,8 +10,7 @@ class RoPE(nn.Module):
         self.d_k = d_k
         # rotate over even indices        
         position = torch.arange(max_seq_len, dtype=dtype, device=device)
-        inv_freq = 1.0 / (theta ** (torch.arange(0, d_k, 2).float() / d_k))
-
+        inv_freq = 1.0 / (theta ** (torch.arange(0, d_k, 2, dtype = dtype, device = device) / d_k))
         emb = einsum(position, inv_freq, "max_seq_len, half_d_k -> max_seq_len half_d_k")
         # register sin and cos  
         self.register_buffer("sin", torch.sin(emb), persistent=False)

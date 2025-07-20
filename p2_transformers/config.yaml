@@ -1,7 +1,7 @@
 seed: 123
 dataset_path: 
-  raw: '~/ai_projects/data/TinyStoriesV2-GPT4-train.txt'
-  tokenized: None
+  raw: '/home/sasha/ai_projects/data/TinyStoriesV2-GPT4-train.txt'
+  tokenized: '/home/sasha/ai_projects/data/TinyStoriesV2-GPT4-train/tokens.npy'
 gpu: 0
 model:
   vocab_size: 10_000
@@ -14,14 +14,14 @@ model:
   dtype: float32
 optimizer:
   name: 'AdamW'
-  lr: 1e-3 # 2e-5 - 5e-5
+  lr: 3e-2 # 1e-3 # 2e-5 - 5e-5
   beta1: 0.9
   beta2: 0.999
   epsilon: 1e-8
   weight_decay: 0.01
   scheduler:
     name: cosine
-    lr_min: 1e-6
+    lr_min: 1e-3 # 1e-6
     warmup_iters: 0.1
     cosine_cycle_iters: 1.0
 train:

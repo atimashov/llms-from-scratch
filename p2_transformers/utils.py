@@ -1,7 +1,12 @@
 import torch
 from torch import nn
 from einops import rearrange, einsum
+import numpy as np
 import numpy.typing as npt
+from numpy import random
+import math
+from typing import Iterable
+
 
 
 def softmax(x: torch.Tensor, dim: int) -> torch.Tensor:
@@ -54,20 +59,32 @@ def cosine_lr_schedule(t: int, lr_max: float, lr_min: float, warmup_iters: int, 
         lr = lr_min
     return lr
 
-def gradient_clipping(params: list, max_l2_norm: float, eps: float = 1e-6):
+def gradient_clipping(params: Iterable[torch.nn.Parameter], max_l2_norm: float, eps: float = 1e-6):
+    """
+    returns pre-clipping gradient value for logging
+    """
     assert max_l2_norm > 0, f"Max L2 norm should be positive but it is {max_l2_norm}."
     # get global norm
-    grads = [param.grad.flatten() for param in params if param.grad is not None]
-    l2_norm = ((torch.cat(grads)**2).sum())**0.5
-    # check if current norm is too large
-    if l2_norm <= max_l2_norm:
-        return
-    # update gradients
+    sum_sq = None
     for param in params:
-        if param.grad is None:
-            continue
-        ratio = max_l2_norm / (l2_norm + eps)
-        param.grad *= ratio
+        g = param.grad
+        if g is not None:
+            if sum_sq is None:
+                sum_sq = torch.zeros(1, device = g.device)
+            sum_sq += g.detach().float().pow(2).sum()
+    # check if no gradients or current norm is too large
+    if sum_sq is None:
+        return None
+    global_l2_norm = sum_sq.sqrt()
+    if global_l2_norm <= max_l2_norm:
+        return global_l2_norm.item()
+    # update gradients
+    scale = max_l2_norm / (global_l2_norm + eps)
+    with torch.no_grad():
+        for param in params:
+            if param.grad is not None:
+                param.grad.mul_(scale.to(param.grad.dtype))
+    return global_l2_norm.item()
 
 def data_loading(x: npt.NDArray, batch_size: int, context_length: int, device: torch.device | None = None) -> (torch.Tensor, torch.Tensor):
     # TODO: clarify notes about np.memmap
@@ -79,9 +96,9 @@ def data_loading(x: npt.NDArray, batch_size: int, context_length: int, device: t
     # sample numpy tokens
     tokens_curr_np = x[mask_curr]
     tokens_next_np = x[mask_next]
-    # convert to PyTorch
-    tokens_curr = torch.from_numpy(tokens_curr_np).to(device)
-    tokens_next = torch.from_numpy(tokens_next_np).to(device)
+    # convert to PyTorch (NOTE: how dtype conversion slows this down?)
+    tokens_curr = torch.from_numpy(tokens_curr_np).to(device = device, dtype = torch.int)
+    tokens_next = torch.from_numpy(tokens_next_np).to(device = device, dtype = torch.int)
     return tokens_curr, tokens_next
 
 def save_checkpoint(model, optimizer, iteration, out):

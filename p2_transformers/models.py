@@ -88,6 +88,7 @@ class MultiHeadSelfAttention(nn.Module):
         self.P_O = nn.Parameter(data)
         # init RoPE
         self.rope = RoPE(theta = theta, d_k = self.d_k, max_seq_len= context_length, device=device, dtype = dtype)
+        self.device = device
 
     def forward(self, x: torch.Tensor, is_masked: bool = True, with_rope = True, token_positions = None):
         # project x to get queries, keys and values
@@ -103,7 +104,7 @@ class MultiHeadSelfAttention(nn.Module):
             K = self.rope(K)
         # create mask
         if is_masked:
-            mask = ~torch.triu(torch.full((Q.shape[-2], K.shape[-2]), True), diagonal=1)
+            mask = ~torch.triu(torch.full((Q.shape[-2], K.shape[-2]), True, device = self.device), diagonal=1)
         else:
             mask = None
         # calculate scaled attention
@@ -142,9 +143,9 @@ class TransformerLM(nn.Module):
     """
     def __init__(self, d_model: int, d_ff: int, num_heads: int, num_layers:int = 6, theta: float = 10000.0, context_length = 256, vocab_size: int = 10_000, device: torch.device | None = None, dtype: torch.dtype | None = None):
         super().__init__()
-        self.token_embeddings = Embedding(num_embeddings=vocab_size,embedding_dim=d_model)
+        self.token_embeddings = Embedding(num_embeddings = vocab_size, embedding_dim = d_model, device = device, dtype = dtype)
         self.layers = nn.Sequential(
-            *[Transformer(d_model = d_model, num_heads = num_heads, d_ff = d_ff, theta = theta, context_length = context_length, device =device, dtype = dtype) for _ in range(num_layers)]
+            *[Transformer(d_model = d_model, num_heads = num_heads, d_ff = d_ff, theta = theta, context_length = context_length, device = device, dtype = dtype) for _ in range(num_layers)]
         )
         self.ln_final = RMSNorm(d_model=d_model, device=device, dtype=dtype)
         self.lm_head = Linear(d_model, vocab_size, device=device,dtype=dtype)
