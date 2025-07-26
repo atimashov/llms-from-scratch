@@ -6,6 +6,7 @@ import numpy.typing as npt
 from numpy import random
 import math
 from typing import Iterable
+from time import perf_counter
 
 
 
@@ -86,10 +87,12 @@ def gradient_clipping(params: Iterable[torch.nn.Parameter], max_l2_norm: float, 
                 param.grad.mul_(scale.to(param.grad.dtype))
     return global_l2_norm.item()
 
-def data_loading(x: npt.NDArray, batch_size: int, context_length: int, device: torch.device | None = None) -> (torch.Tensor, torch.Tensor):
-    # TODO: clarify notes about np.memmap
+def data_loading(x: npt.NDArray, batch_size: int, start_from: int | None, context_length: int, device: torch.device | None = None) -> (torch.Tensor, torch.Tensor):
     # create masks to sample from numpy
-    start_seqs = random.randint(0, x.shape[0] - context_length, size=batch_size)[:, None]
+    if start_from is not None:
+        start_seqs = np.arange(start_from, start_from + batch_size)[:, None]
+    else:
+        start_seqs = random.randint(0, x.shape[0] - context_length, size=batch_size)[:, None] # NOTE: consider shuffle if I want without replacement
     steps_curr = np.arange(context_length)[None, :]
     steps_next = np.arange(1, context_length + 1)[None, :]
     mask_curr, mask_next = start_seqs + steps_curr, start_seqs + steps_next
@@ -101,13 +104,14 @@ def data_loading(x: npt.NDArray, batch_size: int, context_length: int, device: t
     tokens_next = torch.from_numpy(tokens_next_np).to(device = device, dtype = torch.int)
     return tokens_curr, tokens_next
 
-def save_checkpoint(model, optimizer, iteration, out):
+def save_checkpoint(model, optimizer, iteration, out_path):
     obj = {
         "model": model.state_dict(),
         "optimizer": optimizer.state_dict(),
         "iter_number": iteration
     }
-    torch.save(obj, out)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    torch.save(obj, out_path)
 
 def load_checkpoint(src, model, optimizer):
     obj = torch.load(src)
@@ -115,3 +119,29 @@ def load_checkpoint(src, model, optimizer):
     model.load_state_dict(obj["model"])
     optimizer.load_state_dict(obj["optimizer"])
     return obj["iter_number"]
+
+def get_val_loss(x: npt.NDArray, model, loss_fn, context_length: int, batch_size: int, max_length: int | None, device):
+    model.eval()
+    total_loss = 0
+    total_items = 0
+
+    with torch.no_grad():
+        if max_length is None:
+            tokens_curr, tokens_next = data_loading(x, batch_size, None, context_length, device)
+            logits = model(tokens_curr)
+            loss = loss_fn(logits, tokens_next)
+            avg_loss = loss.item()
+        else: # TODO: consider shuffle
+            end_loop = min(x.shape[0] - context_length, max_length)
+            for i in range(0, end_loop, batch_size):
+                curr_batch_size = min(batch_size, end_loop - i)
+                tokens_curr, tokens_next = data_loading(x, curr_batch_size, i, context_length, device)
+                logits = model(tokens_curr)
+                loss = loss_fn(logits, tokens_next)
+                # find cumulative loss
+                total_loss += loss.item() * curr_batch_size
+                total_items += curr_batch_size
+            avg_loss = total_loss / total_items
+    model.train()
+    return avg_loss
+

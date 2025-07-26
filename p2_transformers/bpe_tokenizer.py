@@ -582,7 +582,8 @@ if __name__ == "__main__":
         choices=["save_tokens", "save_tokens_iter", "base_test"],
         help="Use case to train"
     )
-    parser.add_argument("--input-path", type = str, default=str(Path.cwd().parents[2] / "ai_projects" / "data" / "TinyStoriesV2-GPT4-train.txt")) # valid
+    parser.add_argument("--input-path", type = str, default=str(Path.cwd().parents[2] / "ai_projects" / "data" / "TinyStoriesV2-GPT4-train.txt"))
+    parser.add_argument("--tokens-path", type = str, default=str(Path.cwd().parents[2] / "ai_projects" / "data" / "TinyStoriesV2-GPT4-valid.txt"))
     parser.add_argument("--output-path", type = str, default=str(Path.cwd().parents[2] / "ai_projects" / "data"))
     parser.add_argument("--vocab-size", type = int, default = 10_000)
     parser.add_argument("--num-processes", type = int, default = 24)
@@ -592,9 +593,9 @@ if __name__ == "__main__":
     bpe = BPETokenizer(input_path = args.input_path, vocab_size = args.vocab_size, special_tokens = args.special_tokens)
     bpe.train(num_processes = args.num_processes)
 
-    if args.use_case == "save_tokens":
+    if args.use_case == "save_tokens": # TODO: make it more readable
         # create folder if not exist
-        ext = args.input_path.split(".")[-1]
+        ext = args.tokens_path.split(".")[-1]
         filename = args.input_path.split("/")[-1].replace(f".{ext}", "")
         out_dir = os.path.join(args.output_path, filename)
         os.makedirs(out_dir, exist_ok=True)
@@ -603,13 +604,14 @@ if __name__ == "__main__":
 
         # lazily load encoded string
         t = perf_counter()
-        with open(args.input_path, 'r') as f:
+        with open(args.tokens_path, 'r') as f:
             text = f.read()
         token_ids = bpe.encode(text, num_processes = args.num_processes, lazy_out_path = None) # out_dir
         # save without chunking / streaming
         # Pick dtype (uint16 if vocab <= 65536, else uint32)
         token_ids_np = np.asarray(token_ids, dtype=np.uint16 if bpe.vocab_size <=65536 else np.uint32)   # or np.uint32
-        np.save(os.path.join(out_dir, "tokens.npy"), token_ids_np)
+        suffix = "train" if "train" in args.tokens_path else "valid"
+        np.save(os.path.join(out_dir, f"tokens_{suffix}.npy"), token_ids_np)
         print(f"⏱️ Encoded: time={perf_counter() - t:.2f}s") 
         
         # NOTE: to read lazily later: 
