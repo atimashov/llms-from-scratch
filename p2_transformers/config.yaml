@@ -1,9 +1,9 @@
 seed: 123
-dataset_path: 
-  raw: '/home/sasha/ai_projects/data/TinyStoriesV2-GPT4-train.txt'
-  tokenized: '/home/sasha/ai_projects/data/TinyStoriesV2-GPT4-train/tokens.npy'
-  tokenized_validate: '/home/sasha/ai_projects/data/TinyStoriesV2-GPT4-train/tokens_valid.npy'
-gpu: 0
+dataset_path:
+  prefix: '~/ai_projects/data/TinyStoriesV2-GPT4'
+  raw_data: 'raw_data'
+  tokenized: 'tokenized'
+device: 0 # currently no distributed training
 model:
   vocab_size: 10_000
   context_length: 256
@@ -30,8 +30,10 @@ optimizer:
 train:
   total_tokens_processed: 327_680_000 # batch_size x step_count x context_length
   batch_size: 64
-save_model:
+validate:
+  frequency_steps: 10
+  num_samples: 64_000
+serialize:
   path: "weights"
-  steps_freq: 1000
-load_model:
-  path: None
+  frequency_steps: 10
+  first_save: 0.3

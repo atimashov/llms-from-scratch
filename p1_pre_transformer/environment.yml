@@ -19,6 +19,8 @@ dependencies:
   - requests
   - cython
   - setuptools
+  - tensorboard
+  - einops
   - regex
   - pip:
       - py-spy

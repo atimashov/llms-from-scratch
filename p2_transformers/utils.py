@@ -7,8 +7,8 @@ from numpy import random
 import math
 from typing import Iterable
 from time import perf_counter
-
-
+from datetime import datetime
+from pathlib import Path
 
 def softmax(x: torch.Tensor, dim: int) -> torch.Tensor:
     assert -x.dim() <= dim < x.dim()
@@ -120,7 +120,7 @@ def load_checkpoint(src, model, optimizer):
     optimizer.load_state_dict(obj["optimizer"])
     return obj["iter_number"]
 
-def get_val_loss(x: npt.NDArray, model, loss_fn, context_length: int, batch_size: int, max_length: int | None, device):
+def get_valid_loss(x: npt.NDArray, model, loss_fn, context_length: int, batch_size: int, max_length: int | None, device):
     model.eval()
     total_loss = 0
     total_items = 0
@@ -144,4 +144,107 @@ def get_val_loss(x: npt.NDArray, model, loss_fn, context_length: int, batch_size
             avg_loss = total_loss / total_items
     model.train()
     return avg_loss
+
+def get_short_gpu_name(gpu_id=0):
+    name = torch.cuda.get_device_name(gpu_id)
+    for repl in ["NVIDIA", "Generation", "GeForce"]:
+        name = name.replace(repl, "")
+    return name.strip().replace(" ", "")
+
+def parse_config(config):
+    # create dtype map
+    dtype_map = {
+        "float32": torch.float32,
+        "float": torch.float32,
+        "float16": torch.float16,
+        "half": torch.float16,
+        "bfloat16": torch.bfloat16,
+        "bf16": torch.bfloat16, 
+        "float64": torch.float64,
+        "double": torch.float64
+    }
+    
+    # device
+    if config["device"] == "cpu":
+        device = torch.device(config["device"])
+        device_name = "cpu"
+    elif isinstance(config["device"], int):
+        device = torch.device(f"cuda:{config["device"]}")
+        device_name = get_short_gpu_name(config["device"])
+    # TODO: add Mac's 'mps' support here
+    else:
+        raise Exception(f"Unexpected device: {config["device"]}")
+
+    # run's and scheduler's variables
+    bs, cntx = config["train"]["batch_size"], config["model"]["context_length"]
+    steps = int(config["train"]["total_tokens_processed"] / (bs * cntx))
+    lr_max, lr_min = float(config["optimizer"]["lr"]), float(config["optimizer"]["scheduler"]["lr_min"])
+    warmup_iters = int(config["optimizer"]["scheduler"]["warmup_iters"] * steps)
+    cosine_cycle_iters= int(config["optimizer"]["scheduler"]["cosine_cycle_iters"] * steps)
+
+    # model parameters
+    assert config["model"]["dtype"] in dtype_map, f"Type you provided is not supported: {config["model"]["dtype"]}"
+    model_params = {
+        "d_model": config["model"]["d_model"],
+        "d_ff": config["model"]["d_ff"],
+        "num_heads": config["model"]["num_heads"],
+        "num_layers": config["model"]["num_layers"],
+        "theta": config["model"]["rope_theta"],
+        "context_length": config["model"]["context_length"],
+        "vocab_size": config["model"]["vocab_size"],
+        "device": device,
+        "dtype": dtype_map[config["model"]["dtype"]]
+    }
+
+    # optimizer parameters
+    assert config["optimizer"]["name"] in {"AdamW", "Adam"}, f"Currently supported only Adam and AdamW, but provided {config["optimizer"]["name"]}"
+    optimizer_params = {
+        # "params": model.parameters(),
+        "lr": lr_max,
+        "betas": (config["optimizer"]["beta1"], config["optimizer"]["beta2"]),
+        "weight_decay": config["optimizer"]["weight_decay"],
+        "eps": float(config["optimizer"]["epsilon"]),
+        "decoupled": config["optimizer"]["name"] == "AdamW",
+    }
+
+    # scheduler parameters
+    scheduler_params = {
+        "t": 1,
+        "lr_max": lr_max,
+        "lr_min": lr_min,
+        "warmup_iters": warmup_iters,
+        "cosine_cycle_iters":cosine_cycle_iters,
+    }
+
+    # clip_grad
+    clip_grad_params = {"max_norm": config["optimizer"].get("clip_gradient", {}).get("max_norm", None)}
+
+    # tokens parameters
+    assert "tokenized" in config["dataset_path"], f"You need pretokenize text first and provide path."
+    prefix_path = Path(config["dataset_path"]["prefix"]).expanduser() / config["dataset_path"]["tokenized"]
+    tokens_params = {
+        "train": str(prefix_path / "train.npy"),
+        "valid": str(prefix_path / "valid.npy")
+    }
+
+    # run parameters
+    model_str = f"dmodel_{model_params['d_model']}_dff_{model_params['d_ff']}_numlayers_{model_params['num_layers']}_numheads_{model_params['num_heads']}_cntx_{cntx}"
+    optim_str = f"cosine_lrmax{lr_max}_lrmin{lr_min}_steps_{steps}_warmup_{warmup_iters}"
+    dataset_name = Path(config["dataset_path"]["prefix"]).name
+    ts_str = datetime.now().strftime('%Y%m%d_%H%M%S')
+    run_name = f"{dataset_name}/{model_str}/{optim_str}/{device_name}/exp_bs_{bs}_{ts_str}"
+    serialize_freq = max(config["serialize"]["frequency_steps"] // config["validate"]["frequency_steps"], 1) * config["validate"]["frequency_steps"]
+    run_params = {
+        "steps": steps,
+        "batch_size": bs,
+        "context_length": cntx,
+        "valid_freq": config["validate"]["frequency_steps"],
+        "valid_total": config["validate"]["num_samples"],        
+        "serialize_path": config["serialize"]["path"],
+        "serialize_first": config["serialize"]["first_save"],
+        "serialize_freq":serialize_freq,
+        "run_name": run_name,
+        "device": device,
+    }
+    return model_params, optimizer_params, scheduler_params, clip_grad_params, tokens_params, run_params
 

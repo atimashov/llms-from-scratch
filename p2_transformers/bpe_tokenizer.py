@@ -583,7 +583,7 @@ if __name__ == "__main__":
         help="Use case to train"
     )
     parser.add_argument("--input-path", type = str, default=str(Path.cwd().parents[2] / "ai_projects" / "data" / "TinyStoriesV2-GPT4-train.txt"))
-    parser.add_argument("--tokens-path", type = str, default=str(Path.cwd().parents[2] / "ai_projects" / "data" / "TinyStoriesV2-GPT4-valid.txt"))
+    parser.add_argument("--tokens-path", type = str, default=str(Path.cwd().parents[2] / "ai_projects" / "data" / "TinyStoriesV2-GPT4-train.txt")) # valid
     parser.add_argument("--output-path", type = str, default=str(Path.cwd().parents[2] / "ai_projects" / "data"))
     parser.add_argument("--vocab-size", type = int, default = 10_000)
     parser.add_argument("--num-processes", type = int, default = 24)
