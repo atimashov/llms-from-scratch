@@ -193,7 +193,7 @@ def parse_config(config):
         "context_length": config["model"]["context_length"],
         "vocab_size": config["model"]["vocab_size"],
         "device": device,
-        "dtype": dtype_map[config["model"]["dtype"]]
+        "dtype": torch.float32 #dtype_map[config["model"]["dtype"]]
     }
 
     # optimizer parameters
