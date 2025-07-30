@@ -43,14 +43,14 @@ class TransformerLM(nn.Module):
         self.ln_final = RMSNorm(d_model=d_model, device=device, dtype=dtype)
         self.lm_head = Linear(d_model, vocab_size, device=device,dtype=dtype)
     
-    def forward(self, token_ids, prob = False):
+    def forward(self, token_ids, prob: bool = False, tau: float = 1.0):
         x = self.token_embeddings(token_ids)
         x = self.layers(x)
         x = self.ln_final(x)
         logits = self.lm_head(x)
         if not prob:
             return logits
-        probs = softmax(logits, dim= -1)
+        probs = softmax(logits, dim= -1, tau = tau)
         return probs
 
 
