@@ -38,6 +38,7 @@ class BPETokenizer:
         self.input_path = input_path
 
         self.special_tokens = special_tokens
+        self.eof_token = None
         if self.special_tokens:
             self.special_tokens = sorted(self.special_tokens, key=len, reverse=True)
         self.PAT = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
@@ -46,6 +47,10 @@ class BPETokenizer:
         self.vocab = {i: st.encode("utf-8") for i, st in enumerate(special_tokens)}
         self.tokens2id = {st.encode("utf-8"):i  for i, st in enumerate(special_tokens)}
         self.cur_vsize = len(self.vocab)
+        for i, k in self.vocab:
+            if k == "<|endoftext|>".encode("utf-8"):
+                self.eof_token = i
+                break
         for i in range(256):
             self.vocab[self.cur_vsize + i] = bytes([i])
             self.tokens2id[bytes([i])] = self.cur_vsize + i
@@ -376,8 +381,6 @@ class BPETokenizer:
         b = pretoken.encode("utf-8")
         tokens = [b[i:i+1] for i in range(len(b))]
         for token1, token2 in self.merges:
-            # create indices of occurences
-            indices = []
             i = 0
             while i < len(tokens) - 1:
                 if tokens[i] == token1 and tokens[i + 1] == token2:
@@ -395,8 +398,6 @@ class BPETokenizer:
                 b = pretoken.encode("utf-8")
                 tokens = [b[i:i+1] for i in range(len(b))]
                 for token1, token2 in self.merges:
-                    # create indices of occurences
-                    indices = []
                     i = 0
                     while i < len(tokens) - 1:
                         if tokens[i] == token1 and tokens[i + 1] == token2:
@@ -405,44 +406,7 @@ class BPETokenizer:
                 tokens_ids.extend([self.tokens2id[b] for b in tokens])
             return tokens_ids
 
-    def encode_old(self, text: str, num_processes: int = 24) -> list[int | bytes]:
-        """
-        Encode a full text string to a list of token IDs.
-
-        Args:
-            text (str): Input text to tokenize.
-            num_processes (int): Parallelism level for pretoken encoding.
-
-        Returns:
-            list[int]: Token IDs after applying merges.
-        """
-        # compile special tokens pattern
-        if self.special_tokens:
-            st_pat = "(" + "|".join(map(re.escape, self.special_tokens)) + ")"
-            comp_pat = re.compile(st_pat)
-            docs = self.iter_split_bytes(text, comp_pat)
-        else:
-            docs = [(True, False, text)] 
-
-        # iterate over documents
-        ids_encoded = []
-        for i, (_, special_token, doc) in enumerate(docs):
-            if doc == "":
-                continue
-            if special_token:
-                ids_encoded.append(self.tokens2id[doc.encode("utf-8")])
-            else:
-                # split doc on pretoken
-                pretokens = re.findall(self.PAT, doc) # NOTE: OR re.finditer?
-                # encode each pretoken in parallel
-                with Pool(min(num_processes, len(pretokens))) as p:
-                    pretokens_encoded = p.map(self.encode_pretoken, pretokens)  
-                # merge results
-                for ids_pretoken in pretokens_encoded:
-                    ids_encoded.extend(ids_pretoken)
-        return ids_encoded
-
-    def encode(self, text: str, lazy_out_path: str | None, num_processes: int = 24) -> list[int | bytes]:
+    def encode(self, text: str, lazy_out_path: str | None = None, num_processes: int = 24) -> list[int | bytes]:
         """
         Encode a full text string to a list of token IDs.
 
@@ -463,7 +427,7 @@ class BPETokenizer:
             docs = [(True, False, text)] 
 
         # iterate over documents
-        file_size = 0 # TODO: remove
+        dtype = np.uint16 if self.vocab_size <= 65536 else np.uint32
         with Pool(num_processes) as p:
             ids_encoded = []
             docs_chunk = []
@@ -472,22 +436,17 @@ class BPETokenizer:
                     continue
                 docs_chunk.append((special_token, doc))
                 if len(docs_chunk) >= chunk_size:
+                    # run 
                     pretokens_encoded = p.starmap(self.encode_doc, docs_chunk)
                     # merge results
                     for ids_pretoken in pretokens_encoded:
                         ids_encoded.extend(ids_pretoken)
                     docs_chunk = []
                     if lazy_out_path is not None:
-                        dtype = np.uint16 if self.vocab_size <= 65536 else np.uint32
                         with open(os.path.join(lazy_out_path, "tokens.bin"), "ab") as f:
                             f.write(np.asarray(ids_encoded, dtype=dtype).tobytes())
-
                         ids_encoded = []
-                if i % 100_000 == 0:
-                    if "tokens.bin" in os.listdir(lazy_out_path):
-                        file_size = os.path.getsize(os.path.join(lazy_out_path, "tokens.bin"))
-                    print(f"⏱️ {" " * (6 - len(str(i)))}{i}: time = {perf_counter() - t:.2f}s | file size = {file_size}")
-
+                    
             # run Pool last time
             if len(docs_chunk) > 0:
                 pretokens_encoded = p.starmap(self.encode_doc, docs_chunk)
@@ -496,7 +455,6 @@ class BPETokenizer:
                     ids_encoded.extend(ids_pretoken)
                 docs_chunk = []
                 if lazy_out_path is not None:
-                    dtype = np.uint16 if self.vocab_size <= 65536 else np.uint32
                     with open(os.path.join(lazy_out_path, "tokens.bin"), "ab") as f:
                         f.write(np.asarray(ids_encoded, dtype=dtype).tobytes())
                     print(f"Final file size is {os.path.getsize(os.path.join(lazy_out_path, "tokens.bin"))}")
