@@ -10,10 +10,11 @@ from time import perf_counter
 from datetime import datetime
 from pathlib import Path
 
-def softmax(x: torch.Tensor, dim: int) -> torch.Tensor:
-    assert -x.dim() <= dim < x.dim()
+def softmax(x: torch.Tensor, dim: int, tau: float = 1.0) -> torch.Tensor:
+    assert -x.dim() <= dim < x.dim(), "Dimension is wrong"
+    assert t > 0, "Temperature must be positive."
     x_max = x.max(dim=dim, keepdim=True).values
-    exps = torch.exp(x - x_max)
+    exps = torch.exp((x - x_max) / tau)
     return exps / torch.sum(exps, dim = dim, keepdim=True)
 
 def scaled_dot_product_attention(Q: torch.Tensor, K: torch.Tensor, V: torch.Tensor, mask: torch.Tensor | None):
@@ -88,6 +89,16 @@ def gradient_clipping(params: Iterable[torch.nn.Parameter], max_l2_norm: float, 
     return global_l2_norm.item()
 
 def data_loading(x: npt.NDArray, batch_size: int, start_from: int | None, context_length: int, device: torch.device | None = None) -> (torch.Tensor, torch.Tensor):
+    """
+    Create batch of data to train.
+
+    Args:
+
+    Returns:
+        tokens_curr:
+        tokens_next:
+
+    """
     # create masks to sample from numpy
     if start_from is not None:
         start_seqs = np.arange(start_from, start_from + batch_size)[:, None]
