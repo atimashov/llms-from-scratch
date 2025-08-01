@@ -1,14 +1,62 @@
 import regex as re
 from time import perf_counter
-from datetime import datetime
 from typing import BinaryIO, Iterator
-import os
 from multiprocessing import Pool
 from pathlib import Path
-import argparse
 import pickle
 import numpy as np
+import os
+# import atexit
 
+# from utils.profiling import _log_worker_memory, _print_final_worker_stats
+
+_MERGES = None
+_TOKENS2ID = None
+_PAT = None
+
+# atexit.register(_print_final_worker_stats)
+
+def _init_global_vars(merges, tokens2id, pattern):
+    # NOTE: to avoid pickling the whole "self" it is necessary to process outside of the class
+    # it makes run 5x faster and saves memory consumption 4x.
+    global _MERGES, _TOKENS2ID, _PAT
+    _MERGES = merges
+    _TOKENS2ID = tokens2id
+    _PAT = pattern
+
+def _encode_pretoken(pretoken: str, merges: dict, tokens2id: dict):
+    b = pretoken.encode("utf-8")
+    tokens = [b[i:i+1] for i in range(len(b))]
+    while True:
+        best_rank = float("inf")
+        # find best adjacent pair
+        i = 0
+        while i < len(tokens) - 1:
+            curr_rank = merges.get((tokens[i], tokens[i + 1]), None)
+            if curr_rank is not None and curr_rank <= best_rank:
+                if curr_rank < best_rank:
+                    curr_indices = []
+                best_rank = curr_rank
+                curr_indices.append(i)
+                if i + 2 < len(tokens) and tokens[i] == tokens[i + 1] == tokens[i + 2]:
+                    i += 1
+            i += 1
+        if  best_rank == float('inf'):
+            break
+        for i in reversed(curr_indices): # to avoid shifting indices
+            tokens[i:i+2] = [tokens[i] + tokens[i + 1]]
+    return [tokens2id[t] for t in tokens]
+
+def _encode_doc(is_st: bool, doc: str):
+    if is_st:
+        return [_TOKENS2ID[doc.encode("utf-8")]]
+    tokens_ids = []
+    for m in _PAT.finditer(doc):
+        pretoken = m.group(0)
+        tokens_ids.extend(_encode_pretoken(pretoken, _MERGES, _TOKENS2ID))
+
+    # _log_worker_memory("NEW")
+    return tokens_ids
 
 class BPETokenizer:
     """
@@ -44,10 +92,10 @@ class BPETokenizer:
         self.PAT = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
 
         # init Vocab
-        self.vocab = {i: st.encode("utf-8") for i, st in enumerate(special_tokens)}
+        self.vocab = {i: st.encode("utf-8") for i, st in enumerate(special_tokens)} # TODO: deal with None
         self.tokens2id = {st.encode("utf-8"):i  for i, st in enumerate(special_tokens)}
         self.cur_vsize = len(self.vocab)
-        for i, k in self.vocab:
+        for i, k in self.vocab.items():
             if k == "<|endoftext|>".encode("utf-8"):
                 self.eof_token = i
                 break
@@ -58,7 +106,7 @@ class BPETokenizer:
         self.vocab_size = vocab_size
 
         # init merges
-        self.merges = []
+        self.merges = {}
 
     def find_chunk_boundaries(
         self,
@@ -296,7 +344,7 @@ class BPETokenizer:
         """
         best_pair, best_pair_cnt = max(self.pairs_cnt.items(), key=lambda x: (x[1], x[0]))
         # update merges
-        self.merges.append(best_pair)
+        self.merges[best_pair] = self.cur_vsize # TODO: probably -256 or so
         # update vocabulary
         self.vocab[self.cur_vsize] = best_pair[0] + best_pair[1]
         self.tokens2id[best_pair[0] + best_pair[1]] = self.cur_vsize
@@ -349,7 +397,14 @@ class BPETokenizer:
             self.tokens2id[t] = i
         # deserialize merges
         with open(merges_path, "rb") as f:
-            self.merges = pickle.load(f)
+            merges = pickle.load(f)
+        assert type(merges) in {list, dict}, f"Error: Expected type of merges is either list or dict, but provided {type(merges)}."
+        if type(merges) is list:
+            self.merges = {}
+            for i, pair in enumerate(merges):
+                self.merges[pair] = i
+        else:
+            self.merges = merges
 
     def save_files(self, folder_path: str):
         """
@@ -366,46 +421,7 @@ class BPETokenizer:
         # Serialize merges
         with open(Path(folder_path) / "merges.pkl", "wb") as f:
             pickle.dump(self.merges, f)
-    
-    def encode_pretoken(self, pretoken: str):
-        """
-        Encode a single pre-token into BPE IDs using current merge rules.
-
-        Args:
-            pretoken (str): A Unicode string token.
-
-        Returns:
-            list[int]: Token IDs after applying merges.
-        """
-        # create initial list of bytes
-        b = pretoken.encode("utf-8")
-        tokens = [b[i:i+1] for i in range(len(b))]
-        for token1, token2 in self.merges:
-            i = 0
-            while i < len(tokens) - 1:
-                if tokens[i] == token1 and tokens[i + 1] == token2:
-                    tokens[i:i+2] = [token1 + token2]
-                i += 1
-        return [self.tokens2id[b] for b in tokens]
-    
-    def encode_doc(self, special_token: bool, doc: str):
-        if special_token:
-            return [self.tokens2id[doc.encode("utf-8")]]
-        else:
-            pretokens = re.findall(self.PAT, doc) # NOTE: OR re.finditer?
-            tokens_ids = []
-            for pretoken in pretokens:
-                b = pretoken.encode("utf-8")
-                tokens = [b[i:i+1] for i in range(len(b))]
-                for token1, token2 in self.merges:
-                    i = 0
-                    while i < len(tokens) - 1:
-                        if tokens[i] == token1 and tokens[i + 1] == token2:
-                            tokens[i:i+2] = [token1 + token2]
-                        i += 1
-                tokens_ids.extend([self.tokens2id[b] for b in tokens])
-            return tokens_ids
-
+        
     def encode(self, text: str, lazy_out_path: str | None = None, num_processes: int = 24) -> list[int | bytes]:
         """
         Encode a full text string to a list of token IDs.
@@ -415,7 +431,7 @@ class BPETokenizer:
             num_processes (int): Parallelism level for pretoken encoding.
 
         Returns:
-            list[int]: Token IDs after applying merges.
+            list[int]: Token IDs after applying merges or None if lazy writes are performed.
         """
         chunk_size = num_processes * 400
         # compile special tokens pattern
@@ -425,45 +441,53 @@ class BPETokenizer:
             docs = self.iter_split_bytes(text, comp_pat)
         else:
             docs = [(True, False, text)] 
-
+        
         # iterate over documents
+        if not hasattr(self, "vocab_size") and hasattr(self, "vocab"):
+            self.vocab_size = len(self.vocab)
         dtype = np.uint16 if self.vocab_size <= 65536 else np.uint32
-        with Pool(num_processes) as p:
+        # open file for writing if we do it lazily
+        fout = None
+        if lazy_out_path is not None:
+            fout_path = os.path.join(lazy_out_path, "tokens.bin")
+            fout = open(fout_path, "ab")
+        with Pool(num_processes, initializer=_init_global_vars, initargs=(self.merges, self.tokens2id, re.compile(self.PAT))) as p:
             ids_encoded = []
             docs_chunk = []
-            for i, (_, special_token, doc) in enumerate(docs):
+            for _, special_token, doc in docs:
                 if doc == "":
                     continue
                 docs_chunk.append((special_token, doc))
                 if len(docs_chunk) >= chunk_size:
                     # run 
-                    pretokens_encoded = p.starmap(self.encode_doc, docs_chunk)
+                    pretokens_encoded = p.starmap(_encode_doc, docs_chunk)
                     # merge results
                     for ids_pretoken in pretokens_encoded:
                         ids_encoded.extend(ids_pretoken)
                     docs_chunk = []
                     if lazy_out_path is not None:
-                        with open(os.path.join(lazy_out_path, "tokens.bin"), "ab") as f:
-                            f.write(np.asarray(ids_encoded, dtype=dtype).tobytes())
+                        fout.write(np.asarray(ids_encoded, dtype=dtype).tobytes())
                         ids_encoded = []
                     
             # run Pool last time
             if len(docs_chunk) > 0:
-                pretokens_encoded = p.starmap(self.encode_doc, docs_chunk)
+                pretokens_encoded = p.starmap(_encode_doc, docs_chunk)
                 # merge results
                 for ids_pretoken in pretokens_encoded:
                     ids_encoded.extend(ids_pretoken)
                 docs_chunk = []
                 if lazy_out_path is not None:
-                    with open(os.path.join(lazy_out_path, "tokens.bin"), "ab") as f:
-                        f.write(np.asarray(ids_encoded, dtype=dtype).tobytes())
-                    print(f"Final file size is {os.path.getsize(os.path.join(lazy_out_path, "tokens.bin"))}")
+                    fout.write(np.asarray(ids_encoded, dtype=dtype).tobytes())
+                    print(f"Final file size is {os.path.getsize(os.path.join(lazy_out_path, 'tokens.bin'))}")
                     ids_encoded = []
+            if fout:
+                fout.close()
         return ids_encoded
     
-    def encode_iterable(self, iterable: Iterator[str], num_processes: int = 1) -> Iterator[int]:
+    def encode_iterable(self, iterable: Iterator[str]) -> Iterator[int]:
         """
         Streamingly encode an iterable of text chunks into token IDs.
+        Currently does not support parallelization,.
         Trade-off: 
             If we use multiprocessing, it will be faster, but we will use more RAM.
 
@@ -492,16 +516,6 @@ class BPETokenizer:
                     if is_end:
                         tail = ""
                     yield self.tokens2id[doc.encode("utf-8")]
-                # run Pool in parallel (if we are OK to allocate more memory)
-                elif num_processes > 1:
-                        pretokens = re.findall(self.PAT, doc)
-                        if is_end:
-                            tail = pretokens[-1]
-                            pretokens = pretokens[:-1]
-                        if pretokens:
-                            with Pool(min(num_processes, len(pretokens))) as p:
-                                pretokens_encoded = p.map(self.encode_pretoken, pretokens)
-                # run main streaming (without multiprocessing)
                 else:
                     for is_tail, is_match, match in self.iter_split_bytes(doc, re.compile(self.PAT)):
                         if not is_match:
@@ -509,11 +523,10 @@ class BPETokenizer:
                         elif is_end and is_tail:
                             tail = match
                         else:
-                            for encoded_id in self.encode_pretoken(match):
+                            for encoded_id in _encode_pretoken(match, self.merges, self.tokens2id):
                                 yield encoded_id
         if tail != "":
-            encoded_ids = self.encode_pretoken(tail)
-            for encoded_id in encoded_ids:
+            for encoded_id in _encode_pretoken(tail, self.merges, self.tokens2id):
                 yield encoded_id
 
     def decode(self, ids: list[int]) -> str:
@@ -529,78 +542,3 @@ class BPETokenizer:
         byte_seq = b"".join([self.vocab[i] for i in ids])
         text = byte_seq.decode("utf-8", errors="replace")
         return text
-
-
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="BPE tokenizer trainer")
-    parser.add_argument(
-        "--use-case", 
-        type=str, 
-        required=True, 
-        choices=["save_tokens", "save_tokens_iter", "base_test"],
-        help="Use case to train"
-    )
-    parser.add_argument("--input-path", type = str, default=str(Path.cwd().parents[2] / "ai_projects" / "data" / "TinyStoriesV2-GPT4-train.txt"))
-    parser.add_argument("--tokens-path", type = str, default=str(Path.cwd().parents[2] / "ai_projects" / "data" / "TinyStoriesV2-GPT4-train.txt")) # valid
-    parser.add_argument("--output-path", type = str, default=str(Path.cwd().parents[2] / "ai_projects" / "data"))
-    parser.add_argument("--vocab-size", type = int, default = 10_000)
-    parser.add_argument("--num-processes", type = int, default = 24)
-    parser.add_argument("--special-tokens", nargs = "+", type = str, default = ["<|endoftext|>"], help = "List of special tokens")
-    args = parser.parse_args()
-
-    bpe = BPETokenizer(input_path = args.input_path, vocab_size = args.vocab_size, special_tokens = args.special_tokens)
-    bpe.train(num_processes = args.num_processes)
-
-    if args.use_case == "save_tokens": # TODO: make it more readable
-        # create folder if not exist
-        ext = args.tokens_path.split(".")[-1]
-        filename = args.input_path.split("/")[-1].replace(f".{ext}", "")
-        out_dir = os.path.join(args.output_path, filename)
-        os.makedirs(out_dir, exist_ok=True)
-        # save vocab and merge
-        bpe.save_files(out_dir)
-
-        # lazily load encoded string
-        t = perf_counter()
-        with open(args.tokens_path, 'r') as f:
-            text = f.read()
-        token_ids = bpe.encode(text, num_processes = args.num_processes, lazy_out_path = None) # out_dir
-        # save without chunking / streaming
-        # Pick dtype (uint16 if vocab <= 65536, else uint32)
-        token_ids_np = np.asarray(token_ids, dtype=np.uint16 if bpe.vocab_size <=65536 else np.uint32)   # or np.uint32
-        suffix = "train" if "train" in args.tokens_path else "valid"
-        np.save(os.path.join(out_dir, f"tokens_{suffix}.npy"), token_ids_np)
-        print(f"⏱️ Encoded: time={perf_counter() - t:.2f}s") 
-        
-        # NOTE: to read lazily later: 
-        # count = os.path.getsize(bin_path) / (2 if bpe.vocab_size <= 65535 else 4)
-        # arr = np.memmap(bin_path, dtype='<u2', mode='r', shape=(count,))
-
-        
-    elif args.use_case == "save_tokens_iter":
-        pass
-    elif args.use_case == "base_test":
-        # simple text input
-        test_text = "Sasha Likes Capybaras<|endoftext|> capybaras like sasha<|endoftext|>"
-
-        t = perf_counter()
-        ids = bpe.encode(test_text)
-        print("Encoded IDs:", ids)
-        print(f"⏱️ Encoded: time={perf_counter() - t:.2f}s") 
-
-        t = perf_counter()
-        decoded = bpe.decode(ids)
-        print("Decoded Text:", decoded)
-        print(f"⏱️ Decoded: time={perf_counter() - t:.2f}s") 
-
-        print("\n--- Streaming encoding test ---")
-        text_iter = iter([
-            "Sasha Likes Capybaras<|endoftext|> capybaras li",
-            "ke sasha<|endoftext|>"
-        ])
-        t = perf_counter()
-        iter = list(bpe.encode_iterable(text_iter))
-        print("Streamed IDs:")
-        for streamed_id in iter:
-            print(streamed_id)
-        print(f"⏱️ Encoded iter: time={perf_counter() - t:.2f}s")
