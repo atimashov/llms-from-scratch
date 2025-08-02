@@ -12,7 +12,7 @@ from pathlib import Path
 
 def softmax(x: torch.Tensor, dim: int, tau: float = 1.0) -> torch.Tensor:
     assert -x.dim() <= dim < x.dim(), "Dimension is wrong"
-    assert t > 0, "Temperature must be positive."
+    assert tau > 0, "Temperature must be positive."
     x_max = x.max(dim=dim, keepdim=True).values
     exps = torch.exp((x - x_max) / tau)
     return exps / torch.sum(exps, dim = dim, keepdim=True)
@@ -61,7 +61,7 @@ def cosine_lr_schedule(t: int, lr_max: float, lr_min: float, warmup_iters: int, 
         lr = lr_min
     return lr
 
-def gradient_clipping(params: Iterable[torch.nn.Parameter], max_l2_norm: float, eps: float = 1e-6):
+def gradient_clipping(params: Iterable[nn.Parameter], max_l2_norm: float, eps: float = 1e-6):
     """
     returns pre-clipping gradient value for logging
     """
@@ -116,19 +116,21 @@ def data_loading(x: npt.NDArray, batch_size: int, start_from: int | None, contex
     return tokens_curr, tokens_next
 
 def save_checkpoint(model, optimizer, iteration, out_path):
+    model_cpu = model.to('cpu')
     obj = {
-        "model": model.state_dict(),
+        "model": model_cpu.state_dict(),
         "optimizer": optimizer.state_dict(),
         "iter_number": iteration
     }
     out_path.parent.mkdir(parents=True, exist_ok=True)
     torch.save(obj, out_path)
 
-def load_checkpoint(src, model, optimizer):
-    obj = torch.load(src)
+def load_checkpoint(src, model, optimizer, device = "cpu"):
+    obj = torch.load(src, map_location = device)
     # load state dicts
     model.load_state_dict(obj["model"])
-    optimizer.load_state_dict(obj["optimizer"])
+    if optimizer:
+        optimizer.load_state_dict(obj["optimizer"])
     return obj["iter_number"]
 
 def get_valid_loss(x: npt.NDArray, model, loss_fn, context_length: int, batch_size: int, max_length: int | None, device):
@@ -162,7 +164,8 @@ def get_short_gpu_name(gpu_id=0):
         name = name.replace(repl, "")
     return name.strip().replace(" ", "")
 
-def parse_config(config):
+def parse_config(config, mode: str = "train"):
+    assert mode in {"train", "generate"}, f"We can parse only in the following modes: 'train', 'generate', but provided '{mode}'"
     # create dtype map
     dtype_map = {
         "float32": torch.float32,
@@ -186,13 +189,6 @@ def parse_config(config):
     else:
         raise Exception(f"Unexpected device: {config["device"]}")
 
-    # run's and scheduler's variables
-    bs, cntx = config["train"]["batch_size"], config["model"]["context_length"]
-    steps = int(config["train"]["total_tokens_processed"] / (bs * cntx))
-    lr_max, lr_min = float(config["optimizer"]["lr"]), float(config["optimizer"]["scheduler"]["lr_min"])
-    warmup_iters = int(config["optimizer"]["scheduler"]["warmup_iters"] * steps)
-    cosine_cycle_iters= int(config["optimizer"]["scheduler"]["cosine_cycle_iters"] * steps)
-
     # model parameters
     assert config["model"]["dtype"] in dtype_map, f"Type you provided is not supported: {config["model"]["dtype"]}"
     model_params = {
@@ -204,58 +200,74 @@ def parse_config(config):
         "context_length": config["model"]["context_length"],
         "vocab_size": config["model"]["vocab_size"],
         "device": device,
-        "dtype": torch.float32 #dtype_map[config["model"]["dtype"]]
+        "dtype": dtype_map[config["model"]["dtype"]]
     }
 
-    # optimizer parameters
-    assert config["optimizer"]["name"] in {"AdamW", "Adam"}, f"Currently supported only Adam and AdamW, but provided {config["optimizer"]["name"]}"
-    optimizer_params = {
-        # "params": model.parameters(),
-        "lr": lr_max,
-        "betas": (config["optimizer"]["beta1"], config["optimizer"]["beta2"]),
-        "weight_decay": config["optimizer"]["weight_decay"],
-        "eps": float(config["optimizer"]["epsilon"]),
-        "decoupled": config["optimizer"]["name"] == "AdamW",
-    }
+    if mode == "train":
+        # run's and scheduler's variables
+        bs, cntx = config["train"]["batch_size"], config["model"]["context_length"]
+        steps = int(config["train"]["total_tokens_processed"] / (bs * cntx))
+        lr_max, lr_min = float(config["optimizer"]["lr"]), float(config["optimizer"]["scheduler"]["lr_min"])
+        warmup_iters = int(config["optimizer"]["scheduler"]["warmup_iters"] * steps)
+        cosine_cycle_iters= int(config["optimizer"]["scheduler"]["cosine_cycle_iters"] * steps)
 
-    # scheduler parameters
-    scheduler_params = {
-        "t": 1,
-        "lr_max": lr_max,
-        "lr_min": lr_min,
-        "warmup_iters": warmup_iters,
-        "cosine_cycle_iters":cosine_cycle_iters,
-    }
+        # optimizer parameters
+        assert config["optimizer"]["name"] in {"AdamW", "Adam"}, f"Currently supported only Adam and AdamW, but provided {config["optimizer"]["name"]}"
+        optimizer_params = {
+            # "params": model.parameters(),
+            "lr": lr_max,
+            "betas": (config["optimizer"]["beta1"], config["optimizer"]["beta2"]),
+            "weight_decay": config["optimizer"]["weight_decay"],
+            "eps": float(config["optimizer"]["epsilon"]),
+            "decoupled": config["optimizer"]["name"] == "AdamW",
+        }
 
-    # clip_grad
-    clip_grad_params = {"max_norm": config["optimizer"].get("clip_gradient", {}).get("max_norm", None)}
+        # scheduler parameters
+        scheduler_params = {
+            "t": 1,
+            "lr_max": lr_max,
+            "lr_min": lr_min,
+            "warmup_iters": warmup_iters,
+            "cosine_cycle_iters":cosine_cycle_iters,
+        }
 
-    # tokens parameters
-    assert "tokenized" in config["dataset_path"], f"You need pretokenize text first and provide path."
-    prefix_path = Path(config["dataset_path"]["prefix"]).expanduser() / config["dataset_path"]["tokenized"]
-    tokens_params = {
-        "train": str(prefix_path / "train.npy"),
-        "valid": str(prefix_path / "valid.npy")
-    }
+        # clip_grad
+        clip_grad_params = {"max_norm": config["optimizer"].get("clip_gradient", {}).get("max_norm", None)}
 
-    # run parameters
-    model_str = f"dmodel_{model_params['d_model']}_dff_{model_params['d_ff']}_numlayers_{model_params['num_layers']}_numheads_{model_params['num_heads']}_cntx_{cntx}"
-    optim_str = f"cosine_lrmax{lr_max}_lrmin{lr_min}_steps_{steps}_warmup_{warmup_iters}"
-    dataset_name = Path(config["dataset_path"]["prefix"]).name
-    ts_str = datetime.now().strftime('%Y%m%d_%H%M%S')
-    run_name = f"{dataset_name}/{model_str}/{optim_str}/{device_name}/exp_bs_{bs}_{ts_str}"
-    serialize_freq = max(config["serialize"]["frequency_steps"] // config["validate"]["frequency_steps"], 1) * config["validate"]["frequency_steps"]
-    run_params = {
-        "steps": steps,
-        "batch_size": bs,
-        "context_length": cntx,
-        "valid_freq": config["validate"]["frequency_steps"],
-        "valid_total": config["validate"]["num_samples"],        
-        "serialize_path": config["serialize"]["path"],
-        "serialize_first": config["serialize"]["first_save"],
-        "serialize_freq":serialize_freq,
-        "run_name": run_name,
-        "device": device,
-    }
-    return model_params, optimizer_params, scheduler_params, clip_grad_params, tokens_params, run_params
+        # tokens parameters
+        assert "tokenized" in config["dataset_path"], f"You need pretokenize text first and provide path."
+        prefix_path = Path(config["dataset_path"]["prefix"]).expanduser() / config["dataset_path"]["tokenized"]
+        tokens_params = {
+            "train": str(prefix_path / "train.npy"),
+            "valid": str(prefix_path / "valid.npy")
+        }
 
+        # run parameters
+        model_str = f"dmodel_{model_params['d_model']}_dff_{model_params['d_ff']}_numlayers_{model_params['num_layers']}_numheads_{model_params['num_heads']}_cntx_{cntx}"
+        optim_str = f"cosine_lrmax{lr_max}_lrmin{lr_min}_steps_{steps}_warmup_{warmup_iters}"
+        dataset_name = Path(config["dataset_path"]["prefix"]).name
+        ts_str = datetime.now().strftime('%Y%m%d_%H%M%S')
+        run_name = f"{dataset_name}/{model_str}/{optim_str}/{device_name}/exp_bs_{bs}_{ts_str}"
+        serialize_freq = max(config["serialize"]["frequency_steps"] // config["validate"]["frequency_steps"], 1) * config["validate"]["frequency_steps"]
+        run_params = {
+            "steps": steps,
+            "batch_size": bs,
+            "context_length": cntx,
+            "valid_freq": config["validate"]["frequency_steps"],
+            "valid_total": config["validate"]["num_samples"],        
+            "serialize_path": config["serialize"]["path"],
+            "serialize_first": config["serialize"]["first_save"],
+            "serialize_freq":serialize_freq,
+            "run_name": run_name,
+            "device": device,
+        }
+        return model_params, optimizer_params, scheduler_params, clip_grad_params, tokens_params, run_params
+    if mode == "generate":
+        model_path = Path(config["model"]["load_prefix"]).expanduser() / config["model"]["load_name"]
+        tokenizer_params = {
+            "input_path": None,
+            "vocab_size": None,
+            "special_tokens": config["tokenizer"]["special_tokens"]
+        }
+        vocab_merges_path = Path(config["tokenizer"]["files_path"]).expanduser()
+        return model_params, model_path, tokenizer_params, vocab_merges_path

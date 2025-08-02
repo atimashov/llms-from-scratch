@@ -8,7 +8,7 @@ class Tokenizer(ABC):
     """
     Base class of Tokenizers
     """
-    def __init__(self, input_path: str, vocab_size: int, special_tokens: list[str] | None):
+    def __init__(self, input_path: str | None, vocab_size: int | None, special_tokens: list[str] | None):
         self.input_path = input_path
 
         # self.eof_token = None
@@ -110,6 +110,8 @@ class Tokenizer(ABC):
         self.tokens2id = dict()
         for i, t in self.vocab.items():
             self.tokens2id[t] = i
+        # update vocab size
+        self.vocab_size = len(self.vocab)
         # deserialize merges
         if merges_path:
             with open(merges_path, "rb") as f:
