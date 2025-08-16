@@ -61,7 +61,7 @@ class GDMomentum(Optimizer):
 
                 # Update parameters
                 if nesterov:
-                    p.data += -rho * old_v + (1 + rho) * v
+                    p.data += v + rho * (v - old_v)
                 else:
                     p.data -= lr * v
         return loss
