@@ -35,7 +35,6 @@ class GDMomentum(Optimizer):
         super().__init__(params, dict(lr=lr, rho = rho, nesterov = nesterov))
 
     def step(self, closure: Callable | None = None):
-        # TODO: add "Nesterov" case
         loss = None if closure is None else closure() 
         for group in self.param_groups:
             lr = group["lr"]
@@ -157,7 +156,7 @@ class Adam(Optimizer):
                 t = state.get("t", 1)
                 grad = p.grad.data
                 if not adamW:
-                    grad += wd * p.data
+                    grad.add_(p.data, alpha = wd)
 
                 # Get params from the state
                 first_moment = state.get("first_moment", torch.zeros_like(grad))
@@ -172,8 +171,11 @@ class Adam(Optimizer):
                 # Update parameters
                 first_unbias = first_moment / (1 - beta1 ** t)
                 second_unbias = second_moment / (1 - beta2 ** t)
-                decoupled_wd = 0 if not adamW else wd * p.data 
-                p.data -= lr * (first_unbias / torch.sqrt(second_unbias + eps) + decoupled_wd)
+
+                # Docoupled Weight Decay
+                if adamW and wd > 0:
+                    p.data.mul_(1 - lr * wd) 
+                p.data -= lr * first_unbias / torch.sqrt(second_unbias + eps)
             
                 # update state of "t" (current gradient step)
                 state["t"] = t + 1
@@ -181,22 +183,109 @@ class Adam(Optimizer):
 
 
 class Lion(Optimizer):
-    def __init__(self, params: Iterable[nn.Parameter], lr: float = 5e-4):
+    def __init__(self, params: Iterable[nn.Parameter], lr: float = 5e-4, beta: float = 0.9, nesterov: bool = False, weight_decay: float = 0.0):
         if lr < 0:
             raise ValueError(f"Invalid learning rate: {lr}")
-        super().__init__(params, dict(lr=lr))
+        super().__init__(params, dict(lr=lr, beta = beta, nesterov = nesterov, weight_decay = weight_decay))
 
     def step(self, closure: Callable | None = None):
-        raise NotImplementedError("This method has not been implemented yet.")
+        loss = None if closure is None else closure()
+        for group in self.param_groups:
+            lr = group["lr"]
+            beta = group["beta"]
+            nesterov = group["nesterov"]
+            weight_decay = group["weight_decay"]
+
+            for p in group["params"]:
+                if p.grad is None:
+                    continue
+                state = self.state[p]
+                grad = p.grad.data
+
+                if "v" not in state:
+                    state["v"] = torch.zeros_like(grad)
+                v = state["v"]
+
+                if nesterov:
+                    raise NotImplementedError("This method has not been implemented yet.")
+                else:
+                    state["v"].mul_(beta).add_(grad, alpha = 1 - beta)
+                    
+                    # Decoupled weight decay
+                    if weight_decay > 0:
+                        p.data.mul_(1 - lr * weight_decay)
+                    
+                    # Optimizer Step
+                    p.data.add_(torch.sign(v), alpha = -lr)
+        return loss
+
 
 class Adan(Optimizer):
-    def __init__(self, params: Iterable[nn.Parameter], lr: float = 5e-4):
-        if lr < 0:
-            raise ValueError(f"Invalid learning rate: {lr}")
-        super().__init__(params, dict(lr=lr))
+    """
+    Adan optimizer implementation. It always uses decoupled weight decay. 
+
+    Attributes:
+        lr (float): Learning rate of the optimization.
+        beta1 (float): first moment decay ratio.
+        beta2 (float): delta first moment decay ratio.
+        beta3 (float): delta second moment decay ratio.
+        weight_decay (float): weight decay ratio.
+    """
+    def __init__(self, params: Iterable[nn.Parameter], lr: float = 5e-4, betas: tuple = (0.98, 0.92, 0.99), weight_decay: float = 0.0, eps: float = 1e-8):
+        assert lr > 0, f"Invalid learning rate: {lr}"
+        assert len(betas) == 3, f"Invalid betas: {betas}"
+        super().__init__(params, dict(lr=lr, betas=betas, weight_decay = weight_decay, eps = eps))
 
     def step(self, closure: Callable | None = None):
-        raise NotImplementedError("This method has not been implemented yet.")
+        loss = None if closure is None else closure() 
+        for group in self.param_groups:
+            lr = group["lr"]
+            beta1, beta2, beta3 = group["betas"]
+            wd = group["weight_decay"]
+            eps = group["eps"]
+
+            for p in group["params"]:
+                if p.grad is None:
+                    continue
+                # Optimizer state
+                state = self.state[p]
+                t = state.get("t", 1)
+                grad = p.grad.data
+
+                # Get params from the state
+                if "prev_grad" not in state:
+                    state["prev_grad"] = torch.zeros_like(grad)
+                prev_grad = state["prev_grad"]
+                if "ema_gradient" not in state:
+                    state["ema_gradient"] = torch.zeros_like(grad)
+                if "first_moment" not in state:
+                    state["first_moment"] = torch.zeros_like(grad)
+                if "second_moment" not in state:
+                    state["second_moment"] = torch.zeros_like(grad)
+
+                # Update optimizer state
+                state["ema_gradient"].mul_(beta1).add_(grad, alpha = 1 - beta1)
+                state["first_moment"].mul_(beta2).add_(grad - prev_grad, alpha = 1 - beta2)
+                state["second_moment"].mul_(beta3).add_((grad + beta2 * (grad - prev_grad))**2, alpha = 1 - beta3)
+                
+                # Update parameters
+                m_t = state["ema_gradient"] / (1 - beta1 ** t)
+                v_t = state["first_moment"] / (1 - beta2 ** t)
+                n_t = state["second_moment"]/ (1 - beta3 ** t)
+
+                # Optimizer Step
+                step_size = lr / torch.sqrt(n_t + eps)
+                p.data.add_(-step_size * (m_t + beta2 * v_t))
+
+                # Docoupled Weight Decay (in Adan it goes after step)
+                if wd > 0:
+                    p.data.mul_(1 / (1 + lr * wd)) 
+
+
+                # update state of "t" (current gradient step)
+                state["t"] = t + 1
+                state["prev_grad"] = grad.clone()
+        return loss
 
 class AdaFactor(Optimizer):
     def __init__(self, params: Iterable[nn.Parameter], lr: float = 5e-4):
