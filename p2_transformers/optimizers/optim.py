@@ -3,6 +3,7 @@ from torch import nn
 from torch.optim import Optimizer
 from collections.abc import Callable, Iterable
 import math
+from typing import Dict
 
 
 class VanillaGD(Optimizer):
@@ -29,40 +30,36 @@ class VanillaGD(Optimizer):
 
 
 class GDMomentum(Optimizer):
-    def __init__(self, params: Iterable[nn.Parameter], lr: float = 0.01, rho: float = 0.99, nesterov: bool = False):
+    def __init__(self, params: Iterable[nn.Parameter], lr: float = 0.01, rho: float = 0.99, weight_decay: float = 0.01, nesterov: bool = False):
         if lr < 0:
             raise ValueError(f"Invalid learning rate: {lr}")
-        super().__init__(params, dict(lr=lr, rho = rho, nesterov = nesterov))
+        super().__init__(params, dict(lr=lr, rho = rho, weight_decay = weight_decay, nesterov = nesterov))
 
     def step(self, closure: Callable | None = None):
         loss = None if closure is None else closure() 
         for group in self.param_groups:
             lr = group["lr"]
             rho = group["rho"]
+            weight_decay = group["weight_decay"]
             nesterov = group["nesterov"]
 
             for p in group["params"]:
                 if p.grad is None:
                     continue
-                # Optimizer state
+                # Optimizer State and Gradients
                 state = self.state[p]
-                grad = p.grad.data
+                
+                # Apply Weight Decay
+                grad = p.grad.data + weight_decay * p.data
 
                 # Get Velocity
-                old_v = state.get("v", torch.zeros_like(grad))
-                
-                # Update Velocity state
-                if nesterov:
-                    v = rho * old_v - lr * grad     
-                else:
-                    v = rho * old_v + grad
-                state["v"] = v
+                if "v" not in state:
+                    state["v"] = torch.zeros_like(grad)
+                state["v"].mul_(rho).add_(grad)
 
                 # Update parameters
-                if nesterov:
-                    p.data += v + rho * (v - old_v)
-                else:
-                    p.data -= lr * v
+                update = rho * state["v"] + grad if nesterov else state["v"] 
+                p.data -= lr * update
         return loss
 
 class AdaGrad(Optimizer):
@@ -183,29 +180,46 @@ class Adam(Optimizer):
 
 
 class Lion(Optimizer):
-    def __init__(self, params: Iterable[nn.Parameter], lr: float = 5e-4, beta: float = 0.9, nesterov: bool = False, weight_decay: float = 0.0):
+    def __init__(self, params: Iterable[nn.Parameter], lr: float = 5e-4, beta: float = 0.9, nesterov: bool = False, weight_decay: float = 0.0, is_trust_ratio: bool = False, eps: float = 1e-8):
         if lr < 0:
             raise ValueError(f"Invalid learning rate: {lr}")
-        super().__init__(params, dict(lr=lr, beta = beta, nesterov = nesterov, weight_decay = weight_decay))
+        super().__init__(params, dict(lr=lr, beta = beta, nesterov = nesterov, weight_decay = weight_decay, is_trust_ratio = is_trust_ratio, eps = eps))
 
-    def step(self, closure: Callable | None = None):
+    def step(self, closure: Callable | None = None, param_to_name: Dict | None = None):
         loss = None if closure is None else closure()
         for group in self.param_groups:
             lr = group["lr"]
             beta = group["beta"]
             nesterov = group["nesterov"]
             weight_decay = group["weight_decay"]
+            is_trust_ratio = group["is_trust_ratio"]
+            eps = group["eps"]
 
             for p in group["params"]:
                 if p.grad is None:
                     continue
+                # Optimizer State and Gradients
                 state = self.state[p]
                 grad = p.grad.data
 
                 if "v" not in state:
                     state["v"] = torch.zeros_like(grad)
-                v = state["v"]
 
+                # Get Trust Ratio (per layer)
+                if is_trust_ratio: # TODO: remove 'bias', 'bn', 'layernorm' etc.
+                    param_norm = torch.norm(p.data)
+                    # grad_norm = torch.norm(p.grad) # we apply raw gradient without L2 weight deacy
+                    update_vec = torch.sign(state["v"])
+                    update_norm = torch.norm(update_vec)
+                    trust_ratio = 1.0 if param_norm == 0 or update_norm == 0 else param_norm / (update_norm + eps) #(grad_norm + eps)
+                    step_size = lr * trust_ratio
+                    # TODO: DELETE
+                    param_name = param_to_name[p]
+                    # print(f"{' ' * (20 - len(param_name))}{param_name} | param_norm={param_norm.item():.4e}, update_norm={update_norm.item():.4e}, step_size={step_size:.4e}")
+                    # TODO: DELETE
+                else:
+                    step_size = lr
+                
                 if nesterov:
                     raise NotImplementedError("This method has not been implemented yet.")
                 else:
@@ -213,10 +227,10 @@ class Lion(Optimizer):
                     
                     # Decoupled weight decay
                     if weight_decay > 0:
-                        p.data.mul_(1 - lr * weight_decay)
+                        p.data.mul_(1 - step_size * weight_decay)
                     
                     # Optimizer Step
-                    p.data.add_(torch.sign(v), alpha = -lr)
+                    p.data.add_(torch.sign(state["v"]), alpha = -step_size)
         return loss
 
 
@@ -295,6 +309,48 @@ class AdaFactor(Optimizer):
 
     def step(self, closure: Callable | None = None):
         raise NotImplementedError("This method has not been implemented yet.")
+
+class Lars(Optimizer):
+    def __init__(self, params: Iterable[nn.Parameter], lr: float = 0.01, rho: float = 0.99, weight_decay: float = 0.01, nesterov: bool = False, eps = 1e-8):
+        if lr < 0:
+            raise ValueError(f"Invalid learning rate: {lr}")
+        super().__init__(params, dict(lr=lr, rho = rho, weight_decay = weight_decay, nesterov = nesterov, eps = eps))
+
+    def step(self, closure: Callable | None = None):
+        loss = None if closure is None else closure() 
+        for group in self.param_groups:
+            lr = group["lr"]
+            rho = group["rho"]
+            weight_decay = group["weight_decay"]
+            nesterov = group["nesterov"]
+            eps = group["eps"]
+
+            for p in group["params"]:
+                if p.grad is None:
+                    continue
+                    
+                # Optimizer State and Gradients
+                state = self.state[p]
+                
+                # Apply Weight Decay
+                grad = p.grad.data + weight_decay * p.data
+
+                # Get Velocity
+                if "v" not in state:
+                    state["v"] = torch.zeros_like(grad)
+                state["v"].mul_(rho).add_(grad)
+
+                # Get Trust Ratio (per layer)
+                param_norm = torch.norm(p.data)
+                grad_norm = torch.norm(p.grad) # we apply raw gradient without L2 weight deacy
+                trust_ratio = 1.0 if param_norm == 0 or grad_norm == 0 else param_norm / (grad_norm + eps)
+                step_size = lr * trust_ratio
+
+                # Update parameters
+                update = rho * state["v"] + grad if nesterov else state["v"] 
+                p.data -= step_size * update
+        return loss
+
 
 class Lamb(Optimizer):
     def __init__(self, params: Iterable[nn.Parameter], lr: float = 5e-4):
