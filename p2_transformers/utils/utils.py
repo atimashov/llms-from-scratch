@@ -9,6 +9,7 @@ from typing import Iterable
 from time import perf_counter
 from datetime import datetime
 from pathlib import Path
+from optimizers import Adam, Adan, Lion
 
 def softmax(x: torch.Tensor, dim: int, tau: float = 1.0) -> torch.Tensor:
     assert -x.dim() <= dim < x.dim(), "Dimension is wrong"
@@ -116,9 +117,9 @@ def data_loading(x: npt.NDArray, batch_size: int, start_from: int | None, contex
     return tokens_curr, tokens_next
 
 def save_checkpoint(model, optimizer, iteration, out_path):
-    model_cpu = model.to('cpu')
+    model_cpu_state = {k: v.detach().cpu() for k, v in model.state_dict().items()}
     obj = {
-        "model": model_cpu.state_dict(),
+        "model": model_cpu_state,
         "optimizer": optimizer.state_dict(),
         "iter_number": iteration
     }
@@ -163,6 +164,25 @@ def get_short_gpu_name(gpu_id=0):
     for repl in ["NVIDIA", "Generation", "GeForce"]:
         name = name.replace(repl, "")
     return name.strip().replace(" ", "")
+
+def parse_optim(config_opt):
+    assert config_opt["name"] in {"AdamW", "Adam", "Adan", "Lion"}, f"Currently supported: Adam, AdamW, Adan, and Lion; but provided {config_opt["name"]}"
+    optimizer_params = {
+        "lr": float(config_opt["lr"]),
+        "weight_decay": float(config_opt["weight_decay"]),
+    }
+    if config_opt["name"] in {"AdamW", "Adam"}:
+        optimizer_params["betas"] = (config_opt["beta1"], config_opt["beta2"])
+        optimizer_params["eps"] = float(config_opt["epsilon"]),
+        optimizer_params["decoupled"]: config_opt["name"] == "AdamW"
+    elif config_opt["name"] == "Adan":
+        optimizer_params["betas"] = (config_opt["beta1"], config_opt["beta2"], config_opt["beta3"])
+        optimizer_params["eps"] = float(config_opt["epsilon"])
+    elif config_opt["name"] == "Lion":
+        optimizer_params["beta"] = config_opt["beta"]
+        optimizer_params["is_trust_ratio"] = config_opt["is_trust_ratio"]
+        optimizer_params["nesterov"] = config_opt["nesterov"]
+    return optimizer_params
 
 def parse_config(config, mode: str = "train"):
     assert mode in {"train", "generate"}, f"We can parse only in the following modes: 'train', 'generate', but provided '{mode}'"
@@ -212,15 +232,7 @@ def parse_config(config, mode: str = "train"):
         cosine_cycle_iters= int(config["optimizer"]["scheduler"]["cosine_cycle_iters"] * steps)
 
         # optimizer parameters
-        assert config["optimizer"]["name"] in {"AdamW", "Adam"}, f"Currently supported only Adam and AdamW, but provided {config["optimizer"]["name"]}"
-        optimizer_params = {
-            # "params": model.parameters(),
-            "lr": lr_max,
-            "betas": (config["optimizer"]["beta1"], config["optimizer"]["beta2"]),
-            "weight_decay": config["optimizer"]["weight_decay"],
-            "eps": float(config["optimizer"]["epsilon"]),
-            "decoupled": config["optimizer"]["name"] == "AdamW",
-        }
+        optimizer_params  = parse_optim(config["optimizer"])
 
         # scheduler parameters
         scheduler_params = {
@@ -244,10 +256,17 @@ def parse_config(config, mode: str = "train"):
 
         # run parameters
         model_str = f"dmodel_{model_params['d_model']}_dff_{model_params['d_ff']}_numlayers_{model_params['num_layers']}_numheads_{model_params['num_heads']}_cntx_{cntx}"
-        optim_str = f"cosine_lrmax{lr_max}_lrmin{lr_min}_steps_{steps}_warmup_{warmup_iters}"
+        sched_name = config["optimizer"]["scheduler"]["name"]
+        sched_str = f"{sched_name}/steps_{steps}/warmup_{warmup_iters}"
+        optim_suffix = "_tr" if config["optimizer"]["is_trust_ratio"] else ""
+        optim_name = config["optimizer"]["name"] + optim_suffix
+        w_decay = optimizer_params["weight_decay"]
+        optim_str = f"{optim_name}/lrmax{round(lr_max, 7)}_lrmin{round(lr_min, 7)}_wdecay{round(w_decay, 7)}"
         dataset_name = Path(config["dataset_path"]["prefix"]).name
         ts_str = datetime.now().strftime('%Y%m%d_%H%M%S')
-        run_name = f"{dataset_name}/{model_str}/{optim_str}/{device_name}/exp_bs_{bs}_{ts_str}"
+        run_name = f"{dataset_name}/{device_name}/exp_bs_{bs}/{sched_str}/{optim_str}/{model_str}/{ts_str}"
+
+
         serialize_freq = max(config["serialize"]["frequency_steps"] // config["validate"]["frequency_steps"], 1) * config["validate"]["frequency_steps"]
         run_params = {
             "steps": steps,
@@ -271,3 +290,12 @@ def parse_config(config, mode: str = "train"):
         }
         vocab_merges_path = Path(config["tokenizer"]["files_path"]).expanduser()
         return model_params, model_path, tokenizer_params, vocab_merges_path
+
+def get_optim(optim_name, optim_params):
+    assert optim_name in {"AdamW", "Adam", "Adan", "Lion"}, f"Currently supported: Adam, AdamW, Adan, and Lion; but provided {optim_name}"
+    if optim_name in {"AdamW", "Adam"}:
+        return Adam(**optim_params)
+    elif optim_name == "Adan":
+        return Adan(**optim_params)
+    elif optim_name == "Lion":
+        return Lion(**optim_params)
