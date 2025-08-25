@@ -14,12 +14,16 @@ model:
   num_heads: 16 # 17M non-embedding parameters
   dtype: float32
 optimizer:
-  name: 'AdamW'
+  name: 'Lion' # 'AdamW'
   lr: 5e-3 # 1e-3 # 2e-5 - 5e-5
-  beta1: 0.9
-  beta2: 0.999
+  beta: 0.9
+  beta1: 0.98 # 0.9
+  beta2: 0.92 # 0.999
+  beta3: 0.99
   epsilon: 1e-8
-  weight_decay: 0.01
+  weight_decay: 0.0005
+  nesterov: False
+  is_trust_ratio: False
   scheduler:
     name: cosine
     lr_min: 5e-4 # 1e-6

@@ -6,13 +6,12 @@ import yaml
 from argparse import ArgumentParser
 from pathlib import Path
 import os
-from time import perf_counter
+from time import perf_counter, sleep
 from datetime import datetime
 import numpy as np
 
 from models import TransformerLM
-from utils import parse_config, cross_entropy, cosine_lr_schedule, data_loading, get_valid_loss, gradient_clipping, save_checkpoint, load_checkpoint
-from optimizers import Adam
+from utils import parse_config, cross_entropy, cosine_lr_schedule, data_loading, get_valid_loss, gradient_clipping, save_checkpoint, load_checkpoint, get_short_gpu_name, get_optim
 
 
 seed = 123
@@ -57,7 +56,7 @@ def train_loop(model, optimizer, tokens, loss_fn, scheduler_params, max_norm, ru
         # log train params to tensorboard
         writer.add_scalar("train/lr", optimizer.param_groups[0]['lr'], step)
         writer.add_scalar("train/loss", loss.item(), step)
-        writer.add_scalar("train/perplexity", np.exp(loss.item()), step)
+        writer.add_scalar("train/perplexity", float('inf') if loss.item() > 700 else np.exp(loss.item()), step)
 
         # log validate params and log in tensorboard
         if step % valid_freq == 0:
@@ -69,7 +68,7 @@ def train_loop(model, optimizer, tokens, loss_fn, scheduler_params, max_norm, ru
 
             # add validate scalars to Tensorboard
             writer.add_scalar("valid/loss", valid_loss, step)
-            writer.add_scalar("valid/perplexity", np.exp(valid_loss), step)
+            writer.add_scalar("valid/perplexity", float('inf') if valid_loss > 700 else np.exp(valid_loss), step)
 
 
         # Zero out all of the gradients for the variables which the optimizer will update.
@@ -81,7 +80,11 @@ def train_loop(model, optimizer, tokens, loss_fn, scheduler_params, max_norm, ru
         if max_norm is not None:
             gradient_clipping(model.parameters(), max_l2_norm= max_norm)
         
-        optimizer.step()
+        # TODO: DELETE
+        # NOTE: test trust ratio
+        param_to_name = {param: name for name, param in model.named_parameters()}
+        # TODO: DELETE
+        optimizer.step(None, param_to_name) # TODO: DELETE
 
         # update progress bar
         loop.set_postfix(lr = lr, train_loss=loss.item(), min_train_loss=min_train_loss, valid_loss=valid_loss, min_valid_loss=min_valid_loss)
@@ -104,13 +107,28 @@ def train_loop(model, optimizer, tokens, loss_fn, scheduler_params, max_norm, ru
     writer.close()
 
 def main(config):
+    # parse parameters
     model_params, optimizer_params, scheduler_params, clip_grad_params, tokens_params, run_params = parse_config(config)
     max_norm = clip_grad_params["max_norm"]
 
+    # print intro
+    curr_time = datetime.now().time()
+    print()
+    print(
+        f"Run started at {curr_time.strftime("%H:%M:%S")}: batch_size={run_params['batch_size']} | "
+        f"lr_max={scheduler_params['lr_max']} | "
+        f"lr_min={scheduler_params['lr_min']} | "
+        f"context={run_params['context_length']} | "
+        f"device={get_short_gpu_name(config["device"])} | "
+        f"optimizer={config["optimizer"]["name"]} | "
+        f"steps={run_params['steps']} | "
+        f"warmup={scheduler_params['warmup_iters']}"
+    )
+
     # get experiments
-    model = TransformerLM(**model_params)
+    model = TransformerLM(**model_params).to(model_params["device"]) # NOTE: I sent to device explicitely. Not sure if it makes sense.
     optimizer_params["params"] = model.parameters()
-    optimizer = Adam(**optimizer_params)
+    optimizer = get_optim(config["optimizer"]["name"], optimizer_params)
     tokens = {
         "train": np.load(tokens_params["train"], mmap_mode='r'),
         "valid": np.load(tokens_params["valid"], mmap_mode='r')
@@ -119,7 +137,7 @@ def main(config):
     
     # run training loop
     train_loop(model, optimizer, tokens, loss_fn, scheduler_params, max_norm, run_params)
-
+    print("-" * 100)
 
 if __name__ == '__main__':
     seed = 123
@@ -130,16 +148,30 @@ if __name__ == '__main__':
     parser.add_argument('--config', type=str, default='config.yaml', help='config file')
     # parser.add_argument('--log-structure', type=str, default='rtx4000ada', help = 'subfolders structure inside run to log')
     inputs = parser.parse_args()
-    print(inputs)
 
     with open(inputs.config, 'r') as stream:
         config = yaml.safe_load(stream)
+
+    # for lr_max in [5e-3, 1e-3]: # 1e+1, 1e-0, 1e-1, 5e-2, 1e-2, 1e-4
     
-    for lr in [5e-3, 1e-3, 1e-4]: # 1e+1 # 1e-0, 1e-1, 5e-2, 
-        config["optimizer"]["lr"] = lr
-        for ratio in [1e-0, 1e-1, 1e-2, 1e-3]:
-            config["optimizer"]["scheduler"]["lr_min"] = round(lr * ratio, 7)
-            main(config)
+    # normal Lion
+    # config["train"]["batch_size"] = 64
+    # for lr in [1e-3, 5e-4, 3e-4,  1e-4]:
+    #     config["optimizer"]["lr"] = lr
+    #     config["optimizer"]["scheduler"]["lr_min"] = lr * 1e-2
+    #     main(config)
+        
+    # Lion+trust_ratio
+    config["optimizer"]["is_trust_ratio"] = True
+    for bs in [64, 128, 192]:
+        config["train"]["batch_size"] = bs
+        for lr_max in [5e-3, 3e-3, 1e-3, 5e-4, 3e-4,  1e-4]:
+            config["optimizer"]["lr"] = lr_max
+            # for lr_min in [1e-3, 1e-4, 1e-5, 1e-6]: # , 1e-7
+            for ratio in [1e-1, 1e-2]:
+                lr_min = ratio * lr_max
+                config["optimizer"]["scheduler"]["lr_min"] = lr_min
+                main(config)
     
     # if config["gpu"] == 0:
     #     for lr in [10.0, 1.0, 1e-1, 1e-2, 5e-3, 1e-3, 1e-4]:
