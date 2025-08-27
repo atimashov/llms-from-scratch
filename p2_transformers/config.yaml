@@ -15,7 +15,7 @@ model:
   dtype: float32
 optimizer:
   name: 'Lion' # 'AdamW'
-  lr: 5e-3 # 1e-3 # 2e-5 - 5e-5
+  lr: 3e-4 # 5e-3 # 1e-3 # 2e-5 - 5e-5
   beta: 0.9
   beta1: 0.98 # 0.9
   beta2: 0.92 # 0.999
@@ -26,7 +26,7 @@ optimizer:
   is_trust_ratio: False
   scheduler:
     name: cosine
-    lr_min: 5e-4 # 1e-6
+    lr_min: 3e-5 # 1e-6
     warmup_iters: 0.05
     cosine_cycle_iters: 1.0
   clip_gradient:
@@ -34,9 +34,10 @@ optimizer:
 train:
   total_tokens_processed: 327_680_000 # batch_size x step_count x context_length
   batch_size: 64
+  loader_mode: 'in_memory_ids' # 'sample' # , 
 validate:
   frequency_steps: 10
-  num_samples: 64_000
+  num_samples: 64_000 # '-1' means the full validation set
 serialize:
   path: "weights"
   frequency_steps: 10

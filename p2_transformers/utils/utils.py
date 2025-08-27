@@ -9,6 +9,7 @@ from typing import Iterable
 from time import perf_counter
 from datetime import datetime
 from pathlib import Path
+from tqdm import tqdm
 from optimizers import Adam, Adan, Lion
 
 def softmax(x: torch.Tensor, dim: int, tau: float = 1.0) -> torch.Tensor:
@@ -89,7 +90,15 @@ def gradient_clipping(params: Iterable[nn.Parameter], max_l2_norm: float, eps: f
                 param.grad.mul_(scale.to(param.grad.dtype))
     return global_l2_norm.item()
 
-def data_loading(x: npt.NDArray, batch_size: int, start_from: int | None, context_length: int, device: torch.device | None = None) -> (torch.Tensor, torch.Tensor):
+def get_start_seqs(start_from: int | None, batch_size: int | None, x_len: int | None, in_memory_ids: np.ndarray | None, mode : str):
+    assert mode in {"sample", "in_memory_ids"}
+    if mode == "sample":
+        start_seqs = random.randint(0, x_len, size=batch_size)[:, None] # NOTE: consider shuffle if I want without replacement
+    elif mode == "in_memory_ids":
+        start_seqs = in_memory_ids[start_from:start_from + batch_size][:, None]
+    return start_seqs
+
+def data_loading(x: npt.NDArray, context_length: int, start_seqs: np.ndarray, device: torch.device | None = None) -> (torch.Tensor, torch.Tensor):
     """
     Create batch of data to train.
 
@@ -101,10 +110,10 @@ def data_loading(x: npt.NDArray, batch_size: int, start_from: int | None, contex
 
     """
     # create masks to sample from numpy
-    if start_from is not None:
-        start_seqs = np.arange(start_from, start_from + batch_size)[:, None]
-    else:
-        start_seqs = random.randint(0, x.shape[0] - context_length, size=batch_size)[:, None] # NOTE: consider shuffle if I want without replacement
+    # if start_from is not None:
+    #     start_seqs = np.arange(start_from, start_from + batch_size)[:, None]
+    # else:
+    #     start_seqs = random.randint(0, x.shape[0] - context_length, size=batch_size)[:, None] # NOTE: consider shuffle if I want without replacement
     steps_curr = np.arange(context_length)[None, :]
     steps_next = np.arange(1, context_length + 1)[None, :]
     mask_curr, mask_next = start_seqs + steps_curr, start_seqs + steps_next
@@ -134,28 +143,42 @@ def load_checkpoint(src, model, optimizer, device = "cpu"):
         optimizer.load_state_dict(obj["optimizer"])
     return obj["iter_number"]
 
-def get_valid_loss(x: npt.NDArray, model, loss_fn, context_length: int, batch_size: int, max_length: int | None, device):
-    model.eval()
-    total_loss = 0
-    total_items = 0
 
+def eval_batch(x: npt.NDArray, model, loss_fn, context_length: int, batch_size: int, device):
+    model.eval()
     with torch.no_grad():
-        if max_length is None:
-            tokens_curr, tokens_next = data_loading(x, batch_size, None, context_length, device)
+        start_seqs = get_start_seqs(None, batch_size, x.shape[0] - context_length, None, "sample")
+        tokens_curr, tokens_next = data_loading(x, context_length, start_seqs, device)
+        logits = model(tokens_curr)
+        loss = loss_fn(logits, tokens_next).item()
+    model.train()
+    return loss
+
+
+def eval(x: npt.NDArray, model, loss_fn, context_length: int, batch_size: int, num_samples: int | None, device):
+    max_available = x.shape[0] - context_length
+    num_samples = max_available if num_samples is None else min(num_samples, max_available)
+    assert num_samples > 0, "Not enough tokens for evaluation"
+
+    model.eval()
+    total_loss, total_items = 0, 0
+    
+    # create indices
+    im_ids = np.arange(num_samples, dtype = np.int32)
+    random.shuffle(im_ids)
+    
+    with torch.no_grad(), tqdm(range(0, num_samples, batch_size), leave = True) as loop:    
+        for start_from in loop:
+            curr_batch_size = min(batch_size, num_samples - start_from)
+            start_seqs = get_start_seqs(start_from, curr_batch_size, None, im_ids, "in_memory_ids")
+            tokens_curr, tokens_next = data_loading(x, context_length, start_seqs, device)
             logits = model(tokens_curr)
             loss = loss_fn(logits, tokens_next)
-            avg_loss = loss.item()
-        else: # TODO: consider shuffle
-            end_loop = min(x.shape[0] - context_length, max_length)
-            for i in range(0, end_loop, batch_size):
-                curr_batch_size = min(batch_size, end_loop - i)
-                tokens_curr, tokens_next = data_loading(x, curr_batch_size, i, context_length, device)
-                logits = model(tokens_curr)
-                loss = loss_fn(logits, tokens_next)
-                # find cumulative loss
-                total_loss += loss.item() * curr_batch_size
-                total_items += curr_batch_size
+
+            total_loss += loss.item() * curr_batch_size
+            total_items += curr_batch_size
             avg_loss = total_loss / total_items
+            loop.set_postfix(valid_loss=avg_loss, total_items = total_items)
     model.train()
     return avg_loss
 
@@ -183,6 +206,13 @@ def parse_optim(config_opt):
         optimizer_params["is_trust_ratio"] = config_opt["is_trust_ratio"]
         optimizer_params["nesterov"] = config_opt["nesterov"]
     return optimizer_params
+
+def clean(x, precision: int = 0):
+    s = f"{round(float(x), 7):.{precision}e}".rstrip('0').rstrip('.')
+    base, exp = s.split("e")
+    # strip leading 0
+    exp = exp.lstrip("+0") if not exp.startswith('-') else '-' + exp[1:].lstrip("0")
+    return f"{base}e{exp}"
 
 def parse_config(config, mode: str = "train"):
     assert mode in {"train", "generate"}, f"We can parse only in the following modes: 'train', 'generate', but provided '{mode}'"
@@ -261,7 +291,7 @@ def parse_config(config, mode: str = "train"):
         optim_suffix = "_tr" if config["optimizer"]["is_trust_ratio"] else ""
         optim_name = config["optimizer"]["name"] + optim_suffix
         w_decay = optimizer_params["weight_decay"]
-        optim_str = f"{optim_name}/lrmax{round(lr_max, 7)}_lrmin{round(lr_min, 7)}_wdecay{round(w_decay, 7)}"
+        optim_str = f"{optim_name}/lrmax{clean(lr_max)}_lrmin{clean(lr_min)}_wdecay{clean(w_decay)}"
         dataset_name = Path(config["dataset_path"]["prefix"]).name
         ts_str = datetime.now().strftime('%Y%m%d_%H%M%S')
         run_name = f"{dataset_name}/{device_name}/exp_bs_{bs}/{sched_str}/{optim_str}/{model_str}/{ts_str}"
@@ -279,6 +309,7 @@ def parse_config(config, mode: str = "train"):
             "serialize_freq":serialize_freq,
             "run_name": run_name,
             "device": device,
+            "loader_mode": config["train"]["loader_mode"],
         }
         return model_params, optimizer_params, scheduler_params, clip_grad_params, tokens_params, run_params
     if mode == "generate":
@@ -299,3 +330,6 @@ def get_optim(optim_name, optim_params):
         return Adan(**optim_params)
     elif optim_name == "Lion":
         return Lion(**optim_params)
+
+def count_parameters(model):
+    return sum(p.numel() for p in model.parameters() if p.requires_grad)
