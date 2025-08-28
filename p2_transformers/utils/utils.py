@@ -125,13 +125,15 @@ def data_loading(x: npt.NDArray, context_length: int, start_seqs: np.ndarray, de
     tokens_next = torch.from_numpy(tokens_next_np).to(device = device, dtype = torch.int)
     return tokens_curr, tokens_next
 
-def save_checkpoint(model, optimizer, iteration, out_path):
+def save_checkpoint(model, optimizer, iteration, out_path, config = None):
     model_cpu_state = {k: v.detach().cpu() for k, v in model.state_dict().items()}
     obj = {
         "model": model_cpu_state,
         "optimizer": optimizer.state_dict(),
         "iter_number": iteration
     }
+    if config is not None:
+        obj["config"] = config
     out_path.parent.mkdir(parents=True, exist_ok=True)
     torch.save(obj, out_path)
 
@@ -141,7 +143,7 @@ def load_checkpoint(src, model, optimizer, device = "cpu"):
     model.load_state_dict(obj["model"])
     if optimizer:
         optimizer.load_state_dict(obj["optimizer"])
-    return obj["iter_number"]
+    return obj["iter_number"], obj.get("config", None)
 
 
 def eval_batch(x: npt.NDArray, model, loss_fn, context_length: int, batch_size: int, device):
@@ -157,7 +159,7 @@ def eval_batch(x: npt.NDArray, model, loss_fn, context_length: int, batch_size: 
 
 def eval(x: npt.NDArray, model, loss_fn, context_length: int, batch_size: int, num_samples: int | None, device):
     max_available = x.shape[0] - context_length
-    num_samples = max_available if num_samples is None else min(num_samples, max_available)
+    num_samples = max_available if num_samples == -1 else min(num_samples, max_available)
     assert num_samples > 0, "Not enough tokens for evaluation"
 
     model.eval()
@@ -215,7 +217,7 @@ def clean(x, precision: int = 0):
     return f"{base}e{exp}"
 
 def parse_config(config, mode: str = "train"):
-    assert mode in {"train", "generate"}, f"We can parse only in the following modes: 'train', 'generate', but provided '{mode}'"
+    assert mode in {"train", "generate", "eval"}, f"We can parse only in the following modes: 'train', 'generate', but provided '{mode}'"
     # create dtype map
     dtype_map = {
         "float32": torch.float32,
@@ -321,6 +323,10 @@ def parse_config(config, mode: str = "train"):
         }
         vocab_merges_path = Path(config["tokenizer"]["files_path"]).expanduser()
         return model_params, model_path, tokenizer_params, vocab_merges_path
+    if mode == "eval":
+        model_path = Path(config["model"]["load_prefix"]).expanduser() / config["model"]["load_name"]
+        tokens_path = Path(config["data"]["path"]).expanduser()
+        return model_params, model_path, tokens_path
 
 def get_optim(optim_name, optim_params):
     assert optim_name in {"AdamW", "Adam", "Adan", "Lion"}, f"Currently supported: Adam, AdamW, Adan, and Lion; but provided {optim_name}"

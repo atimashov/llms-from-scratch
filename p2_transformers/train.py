@@ -118,7 +118,6 @@ def train_loop(model, optimizer, tokens, loss_fn, scheduler_params, max_norm, ru
         f"Full valid loss: {final_valid_loss:.4f}, Full valid perplexity: {final_perplexity:.2f}, Number of samples: {valid_total:,}, Time={perf_counter() - t:.2f}s",
         step+1
     )
-    print(f"⏱️ Full validation for {valid_total} samples is {final_valid_loss:.4f}. Time={perf_counter() - t:.2f}s") 
     
     # close writer
     writer.close()
