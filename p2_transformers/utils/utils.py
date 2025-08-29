@@ -257,8 +257,10 @@ def parse_config(config, mode: str = "train"):
 
     if mode == "train":
         # run's and scheduler's variables
+        assert "optim_step_batch_size" not in config["train"] or config["train"]["optim_step_batch_size"] % config["train"]["batch_size"] == 0, "'optim step batch size' should be divisible by 'batch size'"
         bs, cntx = config["train"]["batch_size"], config["model"]["context_length"]
-        steps = int(config["train"]["total_tokens_processed"] / (bs * cntx))
+        os_bs = config["train"].get("optim_step_batch_size", config["train"]["batch_size"])
+        steps = (config["train"]["total_tokens_processed"] + os_bs * cntx - 1) // (os_bs * cntx)
         lr_max, lr_min = float(config["optimizer"]["lr"]), float(config["optimizer"]["scheduler"]["lr_min"])
         warmup_iters = int(config["optimizer"]["scheduler"]["warmup_iters"] * steps)
         cosine_cycle_iters= int(config["optimizer"]["scheduler"]["cosine_cycle_iters"] * steps)
@@ -296,15 +298,16 @@ def parse_config(config, mode: str = "train"):
         optim_str = f"{optim_name}/lrmax{clean(lr_max)}_lrmin{clean(lr_min)}_wdecay{clean(w_decay)}"
         dataset_name = Path(config["dataset_path"]["prefix"]).name
         ts_str = datetime.now().strftime('%Y%m%d_%H%M%S')
-        run_name = f"{dataset_name}/{device_name}/exp_bs_{bs}/{sched_str}/{optim_str}/{model_str}/{ts_str}"
+        run_name = f"{dataset_name}/{device_name}/exp_bs_{bs}_step_bs_{os_bs}/{sched_str}/{optim_str}/{model_str}/{ts_str}"
 
 
-        serialize_freq = max(config["serialize"]["frequency_steps"] // config["validate"]["frequency_steps"], 1) * config["validate"]["frequency_steps"]
+        serialize_freq = min(config["serialize"]["frequency"] // config["validate"]["frequency"], 1) * config["validate"]["frequency"]
         run_params = {
             "steps": steps,
             "batch_size": bs,
+            "optimizer_step_batch_size": os_bs,
             "context_length": cntx,
-            "valid_freq": config["validate"]["frequency_steps"],
+            "valid_freq": config["validate"]["frequency"],
             "valid_total": config["validate"]["num_samples"],        
             "serialize_path": config["serialize"]["path"],
             "serialize_first": config["serialize"]["first_save"],
@@ -339,3 +342,9 @@ def get_optim(optim_name, optim_params):
 
 def count_parameters(model):
     return sum(p.numel() for p in model.parameters() if p.requires_grad)
+
+def compute_grad_norm(model):
+    norms = torch.stack([
+        p.grad.norm(2) for p in model.parameters() if p.grad is not None
+    ])
+    return torch.norm(norms).item()

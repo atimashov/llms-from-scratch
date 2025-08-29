@@ -34,11 +34,12 @@ optimizer:
 train:
   total_tokens_processed: 327_680_000 # batch_size x step_count x context_length
   batch_size: 64
+  optim_step_batch_size: 1280
   loader_mode: 'in_memory_ids' # 'sample' # , 
 validate:
-  frequency_steps: 10
+  frequency: 0.1 # assumed that we don't have gradient accumulation
   num_samples: 64_000 # '-1' means the full validation set
 serialize:
   path: "weights"
-  frequency_steps: 10
+  frequency: 0.1 # assumed that we don't have gradient accumulation
   first_save: 0.3

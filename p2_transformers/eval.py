@@ -14,7 +14,6 @@ from models import TransformerLM
 from utils import parse_config, eval, load_checkpoint, cross_entropy, count_parameters, get_short_gpu_name
 
 
-
 def _init_model(model_params, model_path):
     model = TransformerLM(**model_params)
     load_checkpoint(model_path, model, None, model_params["device"])

@@ -21,12 +21,13 @@ def train_loop(model, optimizer, tokens, loss_fn, scheduler_params, max_norm, ru
     # unpack params
     steps = run_params["steps"]
     batch_size = run_params["batch_size"]
+    os_bs = run_params["optimizer_step_batch_size"]
     context_length = run_params["context_length"]
-    valid_freq = run_params["valid_freq"]
+    valid_every = max(1, int(1 / run_params["valid_freq"] * batch_size / os_bs)) # TODO: probably, it makes sense to divide by 'os_bs / batch_size'
     valid_total = run_params["valid_total"] if run_params["valid_total"] >= 0 else tokens["valid"].shape[0]
     serialize_path = run_params["serialize_path"]
     serialize_first = run_params["serialize_first"]
-    serialize_freq = run_params["serialize_freq"]    
+    serialize_every = max(1, int(1 / run_params["serialize_freq"] * batch_size / os_bs))  
     run_name = run_params["run_name"]
     device = run_params["device"]
     loader_mode = run_params["loader_mode"]
@@ -52,47 +53,52 @@ def train_loop(model, optimizer, tokens, loss_fn, scheduler_params, max_norm, ru
 
     # start training
     for step in loop:
+        t_start = perf_counter()
         # update learning rate TODO: create one-line function
         scheduler_params["t"] = step + 1
         lr = cosine_lr_schedule(**scheduler_params)
         for pg in optimizer.param_groups:
             pg["lr"] = lr
            
-        # chose ids of words
-        # start_seqs = get_start_seqs(None, batch_size, tokens["train"].shape[0] - context_length, None, loader_mode)
-        start_seqs = get_start_seqs(step * batch_size, batch_size, tokens["train"].shape[0] - context_length, im_ids, loader_mode)
-        tokens_curr, tokens_next = data_loading(tokens["train"], context_length, start_seqs, device)
-        # calculate training logits and loss
-        logits = model(tokens_curr)
-        loss = loss_fn(logits, tokens_next)
-        if loss.item() < min_train_loss:
-            min_train_loss = loss.item()
+        optimizer.zero_grad()
+        loss_acc = 0
+        accum_steps = os_bs // batch_size
+        for i in range(accum_steps):
+            start_seqs = get_start_seqs(step * os_bs + i * batch_size, batch_size, tokens["train"].shape[0] - context_length, im_ids, loader_mode)
+            # start_seqs = get_start_seqs(step * batch_size, batch_size, tokens["train"].shape[0] - context_length, im_ids, loader_mode)
+            tokens_curr, tokens_next = data_loading(tokens["train"], context_length, start_seqs, device)
+            logits = model(tokens_curr)
+            loss = loss_fn(logits, tokens_next)
+            loss_acc +=  loss.item() / accum_steps
+            (loss / accum_steps).backward()
+        if loss_acc < min_train_loss:
+            min_train_loss = loss_acc
+        
+
         # log train params to tensorboard
         writer.add_scalar("train/lr", optimizer.param_groups[0]['lr'], step)
-        writer.add_scalar("train/loss", loss.item(), step)
-        writer.add_scalar("train/perplexity", float('inf') if loss.item() > 700 else np.exp(loss.item()), step)
+        writer.add_scalar("train/loss", loss_acc, step)
+        writer.add_scalar("train/perplexity", float('inf') if loss_acc > 20 else np.exp(loss_acc), step)
+        grad_norm = compute_grad_norm(model)
+        writer.add_scalar("train/grad_norm_before_clip", grad_norm, step)
 
         # log validate params and log in tensorboard
-        if step % valid_freq == 0:
+        if step % valid_every == 0:
             valid_loss = eval_batch(tokens["valid"], model, loss_fn, context_length, batch_size, device)
             if valid_loss < min_valid_loss:
                 min_valid_loss = valid_loss
-                if step / steps > serialize_first and (step % serialize_freq == 0):
+                if step / steps > serialize_first and step % serialize_every == 0:
                     save_checkpoint(model, optimizer, step, ckpt_path)
 
             # add validate scalars to Tensorboard
             writer.add_scalar("valid/loss", valid_loss, step)
-            writer.add_scalar("valid/perplexity", float('inf') if valid_loss > 700 else np.exp(valid_loss), step)
-
-
-        # Zero out all of the gradients for the variables which the optimizer will update.
-        optimizer.zero_grad()
-        # Backwards pass and computing gradients
-        loss.backward()
+            writer.add_scalar("valid/perplexity", float('inf') if valid_loss > 20 else np.exp(valid_loss), step)
 
         # clip gradients TODO: add to parser
         if max_norm is not None:
             gradient_clipping(model.parameters(), max_l2_norm= max_norm)
+            grad_norm = compute_grad_norm(model)
+            writer.add_scalar("train/grad_norm_after_clip", grad_norm, step)
         
         # TODO: DELETE
         # NOTE: test trust ratio
@@ -100,16 +106,25 @@ def train_loop(model, optimizer, tokens, loss_fn, scheduler_params, max_norm, ru
         # TODO: DELETE
         optimizer.step(None, param_to_name) # TODO: DELETE
 
-        # update progress bar
-        loop.set_postfix(lr = lr, train_loss=loss.item(), min_train_loss=min_train_loss, valid_loss=valid_loss, min_valid_loss=min_valid_loss)
+        # log 'tokens per second'
+        tokens_per_sec = os_bs * context_length / (perf_counter() - t_start)
+        writer.add_scalar("train/tokens_per_sec", tokens_per_sec, step)
 
+        # update progress bar
+        loop.set_postfix(
+            lr=f"{lr:.2e}", 
+            train_loss=f"{loss_acc:.3f}", 
+            min_train_loss=f"{min_train_loss:.3f}",
+            valid_loss=f"{valid_loss:.3f}",
+            min_valid_loss=f"{min_valid_loss:.3f}"
+        )
     # run the best model on the full valid set
     if not ckpt_path.exists():
         save_checkpoint(model, optimizer, -1, ckpt_path)
-    n_iter = load_checkpoint(ckpt_path, model, optimizer)
+    n_iter = load_checkpoint(ckpt_path, model, None)
     t = perf_counter()
     curr_time = datetime.now().time()
-    print(f"Validation started at {curr_time.strftime("%H:%M:%S")}: Number of samples={valid_total}")
+    print(f"Validation started at {curr_time.strftime('%H:%M:%S')}: Number of samples={valid_total}")
 
     final_valid_loss = eval(tokens["valid"], model, loss_fn, context_length, batch_size, valid_total, device)
     final_perplexity = np.exp(final_valid_loss)
@@ -130,14 +145,17 @@ def main(config):
     # print intro
     curr_time = datetime.now().time()
     print()
+    optim_suffix = "_tr" if config["optimizer"]["is_trust_ratio"] else ""
+    optim_name = config["optimizer"]["name"] + optim_suffix
     print(
-        f"Run started at {curr_time.strftime("%H:%M:%S")}: batch_size={run_params['batch_size']} | "
+        f"Run started at {curr_time.strftime("%H:%M:%S")}: bs={run_params['batch_size']} | "
+        f"optim_step_bs={run_params['optimizer_step_batch_size']} | "
         f"lr_max={clean(scheduler_params['lr_max'])} | "
         f"lr_min={clean(scheduler_params['lr_min'])} | "
-        f"weight_decay={clean(optimizer_params['weight_decay'])} | "
+        f"w_decay={clean(optimizer_params['weight_decay'])} | "
         f"context={run_params['context_length']} | "
         f"device={get_short_gpu_name(config["device"])} | "
-        f"optimizer={config["optimizer"]["name"]} | "
+        f"optim={optim_name} | "
         f"steps={run_params['steps']} | "
         f"warmup={scheduler_params['warmup_iters']}"
     )
@@ -170,7 +188,14 @@ if __name__ == '__main__':
 
     with open(inputs.config, 'r') as stream:
         config = yaml.safe_load(stream)
-    main(config)
+    for lr in [6e-3]: # TODO: add 6e-3
+        config["optimizer"]["lr"] = lr
+        config["optimizer"]["scheduler"]["lr_min"] = lr / 10
+        for is_trust_ratio in [False, True]:
+            config["optimizer"]["is_trust_ratio"] = is_trust_ratio
+            for optim_step_batch_size in [1280, 64]:
+                config["train"]["optim_step_batch_size"] = optim_step_batch_size
+                main(config)
     # for lr_max in [5e-3, 1e-3]: # 1e+1, 1e-0, 1e-1, 5e-2, 1e-2, 1e-4
     
     # normal Lion
