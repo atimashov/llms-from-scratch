@@ -34,16 +34,16 @@ def scaled_dot_product_attention(Q: torch.Tensor, K: torch.Tensor, V: torch.Tens
     return att
 
 def cross_entropy(logits: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-    # TODO: assert -x.dim() <= dim < x.dim()
-    # rearrange
-    logits_2d = rearrange(logits, "... v_size -> (...) v_size")
-    target_1d = rearrange(target, "... -> (...)")
-    # substract the largest value
-    adj_logits = logits_2d - logits_2d.max(dim=-1, keepdim=True).values
-    # calculate loss
-    exps = torch.exp(adj_logits)
-    B = adj_logits.shape[0]
-    losses = -adj_logits[torch.arange(B), target_1d] + torch.log(torch.sum(exps, dim = -1))
+    assert logits.shape[:-1] == target.shape, "logits and target shape dimension mismatch"
+    # Flatten all dimensions except vocab
+    logits_flat = rearrange(logits, "... v_size -> (...) v_size")
+    target_flat = rearrange(target, "... -> (...)")
+    # Numerical stability: subtract max logit per row
+    logits_adj = logits_flat - logits_flat.max(dim=-1, keepdim=True).values
+    # Calculate loss: Negative log-likelihood
+    exps = torch.exp(logits_adj)
+    B = logits_flat.shape[0]
+    losses = -logits_adj[torch.arange(B), target_flat] + torch.log(torch.sum(exps, dim = -1))
     return torch.mean(losses)
 
 def perplexity(logits: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
@@ -63,14 +63,14 @@ def cosine_lr_schedule(t: int, lr_max: float, lr_min: float, warmup_iters: int, 
         lr = lr_min
     return lr
 
-def gradient_clipping(params: Iterable[nn.Parameter], max_l2_norm: float, eps: float = 1e-6):
+def gradient_clipping(model, max_l2_norm: float, eps: float = 1e-6):
     """
-    returns pre-clipping gradient value for logging
+    returns pre-clipping and after-clipping gradient value for logging
     """
     assert max_l2_norm > 0, f"Max L2 norm should be positive but it is {max_l2_norm}."
     # get global norm
     sum_sq = None
-    for param in params:
+    for param in model.parameters():
         g = param.grad
         if g is not None:
             if sum_sq is None:
@@ -78,17 +78,20 @@ def gradient_clipping(params: Iterable[nn.Parameter], max_l2_norm: float, eps: f
             sum_sq += g.detach().float().pow(2).sum()
     # check if no gradients or current norm is too large
     if sum_sq is None:
-        return None
+        return None, None
     global_l2_norm = sum_sq.sqrt()
     if global_l2_norm <= max_l2_norm:
-        return global_l2_norm.item()
+        return global_l2_norm.item(), global_l2_norm.item()
     # update gradients
     scale = max_l2_norm / (global_l2_norm + eps)
+    grad_device = global_l2_norm.device
+    sum_sq = torch.zeros(1, device = grad_device)
     with torch.no_grad():
-        for param in params:
+        for param in model.parameters():
             if param.grad is not None:
                 param.grad.mul_(scale.to(param.grad.dtype))
-    return global_l2_norm.item()
+                sum_sq += param.grad.detach().float().pow(2).sum()
+    return global_l2_norm.item(), sum_sq.sqrt().item()
 
 def get_start_seqs(start_from: int | None, batch_size: int | None, x_len: int | None, in_memory_ids: np.ndarray | None, mode : str):
     assert mode in {"sample", "in_memory_ids"}
@@ -110,10 +113,6 @@ def data_loading(x: npt.NDArray, context_length: int, start_seqs: np.ndarray, de
 
     """
     # create masks to sample from numpy
-    # if start_from is not None:
-    #     start_seqs = np.arange(start_from, start_from + batch_size)[:, None]
-    # else:
-    #     start_seqs = random.randint(0, x.shape[0] - context_length, size=batch_size)[:, None] # NOTE: consider shuffle if I want without replacement
     steps_curr = np.arange(context_length)[None, :]
     steps_next = np.arange(1, context_length + 1)[None, :]
     mask_curr, mask_next = start_seqs + steps_curr, start_seqs + steps_next
@@ -198,7 +197,7 @@ def parse_optim(config_opt):
     }
     if config_opt["name"] in {"AdamW", "Adam"}:
         optimizer_params["betas"] = (config_opt["beta1"], config_opt["beta2"])
-        optimizer_params["eps"] = float(config_opt["epsilon"]),
+        optimizer_params["eps"] = float(config_opt["epsilon"])
         optimizer_params["decoupled"]: config_opt["name"] == "AdamW"
     elif config_opt["name"] == "Adan":
         optimizer_params["betas"] = (config_opt["beta1"], config_opt["beta2"], config_opt["beta3"])

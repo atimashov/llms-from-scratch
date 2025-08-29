@@ -79,8 +79,6 @@ def train_loop(model, optimizer, tokens, loss_fn, scheduler_params, max_norm, ru
         writer.add_scalar("train/lr", optimizer.param_groups[0]['lr'], step)
         writer.add_scalar("train/loss", loss_acc, step)
         writer.add_scalar("train/perplexity", float('inf') if loss_acc > 20 else np.exp(loss_acc), step)
-        grad_norm = compute_grad_norm(model)
-        writer.add_scalar("train/grad_norm_before_clip", grad_norm, step)
 
         # log validate params and log in tensorboard
         if step % valid_every == 0:
@@ -96,16 +94,17 @@ def train_loop(model, optimizer, tokens, loss_fn, scheduler_params, max_norm, ru
 
         # clip gradients TODO: add to parser
         if max_norm is not None:
-            gradient_clipping(model.parameters(), max_l2_norm= max_norm)
-            grad_norm = compute_grad_norm(model)
-            writer.add_scalar("train/grad_norm_after_clip", grad_norm, step)
+            g_norm_pre, g_norm_post = gradient_clipping(model, max_l2_norm= max_norm)
+            writer.add_scalar("train/grad_norm/post_clip", g_norm_post, step)
+        else:
+            g_norm_pre = compute_grad_norm(model)
+        writer.add_scalar("train/grad_norm/pre_clip", g_norm_pre, step)
+            
         
-        # TODO: DELETE
-        # NOTE: test trust ratio
-        param_to_name = {param: name for name, param in model.named_parameters()}
-        # TODO: DELETE
-        optimizer.step(None, param_to_name) # TODO: DELETE
-
+        # TODO: DELETE after testing trust_ratio
+        # param_to_name = {param: name for name, param in model.named_parameters()}
+        # optimizer.step(None, param_to_name) # TODO: DELETE
+        optimizer.step()
         # log 'tokens per second'
         tokens_per_sec = os_bs * context_length / (perf_counter() - t_start)
         writer.add_scalar("train/tokens_per_sec", tokens_per_sec, step)
@@ -145,7 +144,7 @@ def main(config):
     # print intro
     curr_time = datetime.now().time()
     print()
-    optim_suffix = "_tr" if config["optimizer"]["is_trust_ratio"] else ""
+    optim_suffix = "_tr" if config["optimizer"]["name"] in {"Lion"} and config["optimizer"]["is_trust_ratio"] else ""
     optim_name = config["optimizer"]["name"] + optim_suffix
     print(
         f"Run started at {curr_time.strftime("%H:%M:%S")}: bs={run_params['batch_size']} | "
@@ -188,50 +187,25 @@ if __name__ == '__main__':
 
     with open(inputs.config, 'r') as stream:
         config = yaml.safe_load(stream)
-    for lr in [6e-3]: # TODO: add 6e-3
-        config["optimizer"]["lr"] = lr
-        config["optimizer"]["scheduler"]["lr_min"] = lr / 10
-        for is_trust_ratio in [False, True]:
-            config["optimizer"]["is_trust_ratio"] = is_trust_ratio
-            for optim_step_batch_size in [1280, 64]:
-                config["train"]["optim_step_batch_size"] = optim_step_batch_size
-                main(config)
-    # for lr_max in [5e-3, 1e-3]: # 1e+1, 1e-0, 1e-1, 5e-2, 1e-2, 1e-4
-    
-    # normal Lion
-    # config["train"]["batch_size"] = 64
-    # for lr in [1e-3, 5e-4, 3e-4,  1e-4]:
+
+    # testing AdamW
+    for weight_decay in [1e-2, 1e-3, 5e-4, 1e-4, 0]:
+        config["optimizer"]["weight_decay"] = weight_decay
+        for lr in [5e-3, 5e-4]:
+            config["optimizer"]["lr"] = lr
+            for lr_min in [1e-3, 1e-5, 1e-7]:
+                config["optimizer"]["scheduler"]["lr_min"] = lr_min
+                for optim_step_batch_size in [64]: #[1280, 64]:
+                    config["train"]["optim_step_batch_size"] = optim_step_batch_size
+                    main(config)
+
+    # testing trust ratio in Lion
+    # for lr in [6e-3]:
     #     config["optimizer"]["lr"] = lr
-    #     config["optimizer"]["scheduler"]["lr_min"] = lr * 1e-2
-    #     main(config)
-        
-    # Lion+trust_ratio
-    # config["optimizer"]["is_trust_ratio"] = True
-    # for bs in [64, 128, 192]:
-    #     config["train"]["batch_size"] = bs
-    #     for lr_max in [5e-3, 3e-3, 1e-3, 5e-4, 3e-4,  1e-4]:
-    #         config["optimizer"]["lr"] = lr_max
-    #         # for lr_min in [1e-3, 1e-4, 1e-5, 1e-6]: # , 1e-7
-    #         for ratio in [1e-1, 1e-2]:
-    #             lr_min = ratio * lr_max
-    #             config["optimizer"]["scheduler"]["lr_min"] = lr_min
+    #     config["optimizer"]["scheduler"]["lr_min"] = lr / 10
+    #     for is_trust_ratio in [True]: # [False, True]:
+    #         config["optimizer"]["is_trust_ratio"] = is_trust_ratio
+    #         for optim_step_batch_size in [64]: #[1280, 64]:
+    #             config["train"]["optim_step_batch_size"] = optim_step_batch_size
     #             main(config)
     
-    # if config["gpu"] == 0:
-    #     for lr in [10.0, 1.0, 1e-1, 1e-2, 5e-3, 1e-3, 1e-4]:
-    #         config["optimizer"]["lr"] = lr
-    #         for ratio in [1.0, 1e-1, 5e-2, 1e-2, 5e-3, 1e-3]:
-    #             config["optimizer"]["scheduler"]["lr_min"] = round(lr * ratio, 6)
-    #             main(config, inputs.log_structure)
-    # elif config["gpu"] == 1:
-    #     for lr in [10.0, 1.0, 1e-1, 1e-2]:
-    #         config["optimizer"]["lr"] = lr
-    #         for ratio in [1.0, 1e-1, 1e-2]:
-    #             config["optimizer"]["scheduler"]["lr_min"] = round(lr * ratio, 6)
-    #             main(config, inputs.log_structure)
-    # elif config["gpu"] == 1:
-    #     for lr in [7e-3, 4e-3, 1e-3]: # [5e-2, 3e-2, 1e-2, 5e-3]:
-    #         config["optimizer"]["lr"] = lr
-    #         for ratio in [2e-1, 1e-1, 5e-2]: #[1e-1, 5e-2]:
-    #             config["optimizer"]["scheduler"]["lr_min"] = round(lr * ratio, 6)
-    #             main(config, inputs.log_structure)
