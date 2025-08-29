@@ -89,8 +89,8 @@ if __name__ == '__main__':
     # read config
     parser = ArgumentParser()
     parser.add_argument('--config', type=str, default='config_gen.yaml', help='config file')
-    parser.add_argument('--prompt', type=str, default="I know one girl. She is from Curitiba. It is somewhere in Brazil.", help='Prompt to generate text')
-    parser.add_argument('--tau', type=float, default=0.3, help='Temperature')
+    parser.add_argument('--prompt', type=str, default="Once upon a time", help='Prompt to generate text')
+    parser.add_argument('--tau', type=float, default=1.0, help='Temperature')
     parser.add_argument('--topk', type=int, default=100, help='Top K')
     
     inputs = parser.parse_args()
