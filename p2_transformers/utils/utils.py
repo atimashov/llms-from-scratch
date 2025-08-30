@@ -96,9 +96,14 @@ def gradient_clipping(model, max_l2_norm: float, eps: float = 1e-6):
 def get_start_seqs(start_from: int | None, batch_size: int | None, x_len: int | None, in_memory_ids: np.ndarray | None, mode : str):
     assert mode in {"sample", "in_memory_ids"}
     if mode == "sample":
-        start_seqs = random.randint(0, x_len, size=batch_size)[:, None] # NOTE: consider shuffle if I want without replacement
+        start_seqs = random.randint(0, x_len, size=batch_size)[:, None]
     elif mode == "in_memory_ids":
-        start_seqs = in_memory_ids[start_from:start_from + batch_size][:, None]
+        start_from = start_from % in_memory_ids.shape[0] 
+        start_seqs = in_memory_ids[start_from:start_from + batch_size]
+        if start_from + batch_size > in_memory_ids.shape[0]:
+            offset = start_from + batch_size - in_memory_ids.shape[0]
+            start_seqs = np.concat((start_seqs, in_memory_ids[:offset]), axis = 0)
+    start_seqs = start_seqs[:, None]
     return start_seqs
 
 def data_loading(x: npt.NDArray, context_length: int, start_seqs: np.ndarray, device: torch.device | None = None) -> (torch.Tensor, torch.Tensor):
