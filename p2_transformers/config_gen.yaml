@@ -14,4 +14,4 @@ model:
 tokenizer:
   special_tokens: ["<|endoftext|>"]
   files_path: "~/ai_projects/data/TinyStoriesV2-GPT4" #-train"
-max_num_tokens: 1000
+max_num_tokens: 300

@@ -31,6 +31,7 @@ class Generator:
         self.tokenizer = self._init_tokenizer(tokenizer_params, vocab_merges_path)
         self.eof_token = self.tokenizer.eof_token
         self.model = self._init_model(model_params, model_path)
+        self.cntx = self.model.context_length
         self.n_steps = config.get("max_num_tokens", float('inf'))
 
     def _init_model(self, model_params: dict, model_path: str):
@@ -63,7 +64,7 @@ class Generator:
         while curr_pred != self.eof_token and step < self.n_steps:
             curr_pred = self.generate_next(tokens, tau, topk)
             add = torch.tensor([[curr_pred]]).to(device = self.device, dtype = torch.long)
-            tokens = torch.cat((tokens, add), dim = 1) # TODO: probably can do more efficiently, for example pre-allocate memory
+            tokens = torch.cat((tokens[:,-(self.cntx - 1):], add), dim = 1) # TODO: probably can do more efficiently, for example pre-allocate memory
             step += 1
             if curr_pred != self.eof_token:
                 tokens_pred.append(curr_pred)
@@ -71,6 +72,7 @@ class Generator:
 
     def generate(self, prompt: str, tau: float = 1.0, topk: int | None = None):
         # encode
+        assert len(prompt) > 0, "We expect some prompt, but you entered nothing."
         tokens_list = self.tokenizer.encode(prompt)
         tokens = torch.as_tensor(tokens_list, device = self.device, dtype = torch.long)
         if tokens.ndim == 1:
@@ -101,6 +103,6 @@ if __name__ == '__main__':
     output = gen.generate(inputs.prompt, tau = inputs.tau, topk=inputs.topk)
     print(f"⏱️ Generation time={perf_counter() - t:.2f}s")
     print("*" * 100)
-    print(inputs.prompt)
+    print(f"Prompt: '{inputs.prompt}'")
     print("-" * 100)
-    print(output)
+    print(f"Generation: '{output}'")

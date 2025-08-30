@@ -36,6 +36,7 @@ class TransformerLM(nn.Module):
     """
     def __init__(self, d_model: int, d_ff: int, num_heads: int, num_layers:int = 6, theta: float = 10000.0, context_length = 256, vocab_size: int = 10_000, device: torch.device | None = None, dtype: torch.dtype | None = None):
         super().__init__()
+        self.context_length = context_length
         self.token_embeddings = Embedding(num_embeddings = vocab_size, embedding_dim = d_model, device = device, dtype = dtype)
         self.layers = nn.Sequential(
             *[Transformer(d_model = d_model, num_heads = num_heads, d_ff = d_ff, theta = theta, context_length = context_length, device = device, dtype = dtype) for _ in range(num_layers)]
