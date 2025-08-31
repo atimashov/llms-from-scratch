@@ -17,7 +17,7 @@ from utils import * #parse_config, cross_entropy, cosine_lr_schedule, get_start_
 seed = 123
 torch.manual_seed(seed)
 
-def train_loop(model, optimizer, tokens, loss_fn, scheduler_params, max_norm, run_params):
+def train_loop(model, optimizer, tokens, loss_fn, scheduler_params, max_norm, run_params, config = None):
     # unpack params
     steps = run_params["steps"]
     batch_size = run_params["batch_size"]
@@ -65,7 +65,6 @@ def train_loop(model, optimizer, tokens, loss_fn, scheduler_params, max_norm, ru
         accum_steps = os_bs // batch_size
         for i in range(accum_steps):
             start_seqs = get_start_seqs(step * os_bs + i * batch_size, batch_size, tokens["train"].shape[0] - context_length, im_ids, loader_mode)
-            # start_seqs = get_start_seqs(step * batch_size, batch_size, tokens["train"].shape[0] - context_length, im_ids, loader_mode)
             tokens_curr, tokens_next = data_loading(tokens["train"], context_length, start_seqs, device)
             logits = model(tokens_curr)
             loss = loss_fn(logits, tokens_next)
@@ -86,7 +85,7 @@ def train_loop(model, optimizer, tokens, loss_fn, scheduler_params, max_norm, ru
             if valid_loss < min_valid_loss:
                 min_valid_loss = valid_loss
                 if step / steps > serialize_first and step % serialize_every == 0:
-                    save_checkpoint(model, optimizer, step, ckpt_path)
+                    save_checkpoint(model, optimizer, step, min_valid_loss, -1, ckpt_path, config)
 
             # add validate scalars to Tensorboard
             writer.add_scalar("valid/loss", valid_loss, step)
@@ -102,9 +101,9 @@ def train_loop(model, optimizer, tokens, loss_fn, scheduler_params, max_norm, ru
             
         
         # TODO: DELETE after testing trust_ratio
-        # param_to_name = {param: name for name, param in model.named_parameters()}
-        # optimizer.step(None, param_to_name) # TODO: DELETE
-        optimizer.step()
+        param_to_name = {param: name for name, param in model.named_parameters()}
+        optimizer.step(None, param_to_name) # TODO: DELETE
+        # optimizer.step()
         # log 'tokens per second'
         tokens_per_sec = os_bs * context_length / (perf_counter() - t_start)
         writer.add_scalar("train/tokens_per_sec", tokens_per_sec, step)
@@ -119,14 +118,16 @@ def train_loop(model, optimizer, tokens, loss_fn, scheduler_params, max_norm, ru
         )
     # run the best model on the full valid set
     if not ckpt_path.exists():
-        save_checkpoint(model, optimizer, -1, ckpt_path)
-    n_iter = load_checkpoint(ckpt_path, model, None)
+        save_checkpoint(model, optimizer, -1, -1, -1, ckpt_path, config)
+    n_iter, loss_step, _, _ = load_checkpoint(ckpt_path, model, None, device)
+
     t = perf_counter()
     curr_time = datetime.now().time()
     print(f"Validation started at {curr_time.strftime('%H:%M:%S')}: Number of samples={valid_total}")
 
     final_valid_loss = eval(tokens["valid"], model, loss_fn, context_length, batch_size, valid_total, device)
     final_perplexity = np.exp(final_valid_loss)
+    save_checkpoint(model, optimizer, n_iter, loss_step, final_valid_loss, ckpt_path, config)
     writer.add_text(
         "summary/final_valid_metrics",
         f"Full valid loss: {final_valid_loss:.4f}, Full valid perplexity: {final_perplexity:.2f}, Number of samples: {valid_total:,}, Time={perf_counter() - t:.2f}s",
@@ -138,7 +139,7 @@ def train_loop(model, optimizer, tokens, loss_fn, scheduler_params, max_norm, ru
 
 def main(config):
     # parse parameters
-    model_params, optimizer_params, scheduler_params, clip_grad_params, tokens_params, run_params = parse_config(config)
+    model_params, ckpt_path, optimizer_params, scheduler_params, clip_grad_params, tokens_params, run_params = parse_config(config)
     max_norm = clip_grad_params["max_norm"]
 
     # print intro
@@ -161,6 +162,9 @@ def main(config):
 
     # get experiments
     model = TransformerLM(**model_params).to(model_params["device"]) # NOTE: I sent to device explicitely. Not sure if it makes sense.
+    if ckpt_path:
+        n_iter, loss_step, loss_full, _ = load_checkpoint(ckpt_path, model, None, model_params["device"])
+        run_params["run_name"] = run_params["run_name"].format(f"{loss_full:.4f}" if loss_full else "unkn")
     optimizer_params["params"] = model.parameters()
     optimizer = get_optim(config["optimizer"]["name"], optimizer_params)
     tokens = {
@@ -172,7 +176,7 @@ def main(config):
     loss_fn = cross_entropy # TODO: probably, it makes sense to automate
     
     # run training loop
-    train_loop(model, optimizer, tokens, loss_fn, scheduler_params, max_norm, run_params)
+    train_loop(model, optimizer, tokens, loss_fn, scheduler_params, max_norm, run_params, config)
     print("-" * 100)
 
 if __name__ == '__main__':
@@ -182,22 +186,35 @@ if __name__ == '__main__':
     # read config
     parser = ArgumentParser()
     parser.add_argument('--config', type=str, default='config.yaml', help='config file')
-    # parser.add_argument('--log-structure', type=str, default='rtx4000ada', help = 'subfolders structure inside run to log')
     inputs = parser.parse_args()
 
     with open(inputs.config, 'r') as stream:
         config = yaml.safe_load(stream)
+    config["optimizer"]["lr"] = 17e-4
+    main(config)
 
-    # testing AdamW
-    for weight_decay in [1e-2, 1e-3, 5e-4, 1e-4, 0]:
-        config["optimizer"]["weight_decay"] = weight_decay
-        for lr in [5e-3, 5e-4]:
-            config["optimizer"]["lr"] = lr
-            for lr_min in [1e-3, 1e-5, 1e-7]:
-                config["optimizer"]["scheduler"]["lr_min"] = lr_min
-                for optim_step_batch_size in [64]: #[1280, 64]:
-                    config["train"]["optim_step_batch_size"] = optim_step_batch_size
-                    main(config)
+    # TODO: remove it
+    # config["optimizer"]["weight_decay"] = 5e-4
+    # for lr_max, lr_min in [[3e-4, 3e-6], [3e-5, 3e-7]]: # [[5e-5, 5e-7], [5e-6, 5e-8]]: # 
+    #     config["optimizer"]["lr"] = lr_max # 3e-3 # 1e-2 # 3e-4
+    #     config["optimizer"]["scheduler"]["lr_min"] = lr_min  # 1e-3 # 3e-5
+    #     config["train"]["optim_step_batch_size"] = 64
+    #     for warmup_iters in [0.05, 0]:
+    #         config["optimizer"]["scheduler"]["warmup_iters"] = warmup_iters
+    #         main(config)
+    # TODO: remove it
+
+
+    # # testing AdamW
+    # for weight_decay in [5e-4, 1e-4, 0]: # 1e-2, 1e-3, 
+    #     config["optimizer"]["weight_decay"] = weight_decay
+    #     for lr in [1e-3, 1e-4]:
+    #         config["optimizer"]["lr"] = lr
+    #         for lr_min in [1e-3, 1e-5, 1e-7]:
+    #             config["optimizer"]["scheduler"]["lr_min"] = lr_min
+    #             for optim_step_batch_size in [64]: #[1280, 64]:
+    #                 config["train"]["optim_step_batch_size"] = optim_step_batch_size
+    #                 main(config)
 
     # testing trust ratio in Lion
     # for lr in [6e-3]:

@@ -33,17 +33,24 @@ def scaled_dot_product_attention(Q: torch.Tensor, K: torch.Tensor, V: torch.Tens
     att = einsum(weights, V, "... seq_len seq_len2, ... seq_len2 d_v -> ... seq_len d_v")
     return att
 
-def cross_entropy(logits: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+def cross_entropy(logits: torch.Tensor, target: torch.Tensor, z_alpha:float = 0.0) -> torch.Tensor:
     assert logits.shape[:-1] == target.shape, "logits and target shape dimension mismatch"
     # Flatten all dimensions except vocab
     logits_flat = rearrange(logits, "... v_size -> (...) v_size")
     target_flat = rearrange(target, "... -> (...)")
+    
     # Numerical stability: subtract max logit per row
     logits_adj = logits_flat - logits_flat.max(dim=-1, keepdim=True).values
-    # Calculate loss: Negative log-likelihood
-    exps = torch.exp(logits_adj)
+    
+    # Log-sum-exp trick
+    log_z = torch.log(torch.sum(torch.exp(logits_adj), dim = -1))
     B = logits_flat.shape[0]
-    losses = -logits_adj[torch.arange(B), target_flat] + torch.log(torch.sum(exps, dim = -1))
+    logits_idx = logits_adj[torch.arange(B), target_flat]
+
+    # Calculate loss: Negative log-likelihood and log_z
+    losses = -logits_idx + log_z
+    if z_alpha > 0:
+        losses += z_alpha * log_z**2
     return torch.mean(losses)
 
 def perplexity(logits: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
@@ -129,12 +136,14 @@ def data_loading(x: npt.NDArray, context_length: int, start_seqs: np.ndarray, de
     tokens_next = torch.from_numpy(tokens_next_np).to(device = device, dtype = torch.int)
     return tokens_curr, tokens_next
 
-def save_checkpoint(model, optimizer, iteration, out_path, config = None):
+def save_checkpoint(model, optimizer, iteration, loss_step, loss_full, out_path, config = None):
     model_cpu_state = {k: v.detach().cpu() for k, v in model.state_dict().items()}
     obj = {
         "model": model_cpu_state,
         "optimizer": optimizer.state_dict(),
-        "iter_number": iteration
+        "iter_number": iteration,
+        "loss_step": loss_step,
+        "loss_full": loss_full,
     }
     if config is not None:
         obj["config"] = config
@@ -147,7 +156,7 @@ def load_checkpoint(src, model, optimizer, device = "cpu"):
     model.load_state_dict(obj["model"])
     if optimizer:
         optimizer.load_state_dict(obj["optimizer"])
-    return obj["iter_number"], obj.get("config", None)
+    return obj["iter_number"], obj.get("loss_step", None), obj.get("loss_full", None), obj.get("config", None)
 
 
 def eval_batch(x: npt.NDArray, model, loss_fn, context_length: int, batch_size: int, device):
@@ -258,6 +267,7 @@ def parse_config(config, mode: str = "train"):
         "device": device,
         "dtype": dtype_map[config["model"]["dtype"]]
     }
+    model_path = None if "load_prefix" not in config["model"] else Path(config["model"]["load_prefix"]).expanduser() / config["model"]["load_name"]
 
     if mode == "train":
         # run's and scheduler's variables
@@ -302,7 +312,8 @@ def parse_config(config, mode: str = "train"):
         optim_str = f"{optim_name}/lrmax{clean(lr_max)}_lrmin{clean(lr_min)}_wdecay{clean(w_decay)}"
         dataset_name = Path(config["dataset_path"]["prefix"]).name
         ts_str = datetime.now().strftime('%Y%m%d_%H%M%S')
-        run_name = f"{dataset_name}/{device_name}/exp_bs_{bs}_step_bs_{os_bs}/{sched_str}/{optim_str}/{model_str}/{ts_str}"
+        loss_eval = "init" if model_path is None else '{}'
+        run_name = f"{dataset_name}/{device_name}/exp_bs_{bs}_step_bs_{os_bs}/loss_{loss_eval}/{sched_str}/{optim_str}/{model_str}/{ts_str}"
 
 
         serialize_freq = min(config["serialize"]["frequency"] // config["validate"]["frequency"], 1) * config["validate"]["frequency"]
@@ -320,9 +331,8 @@ def parse_config(config, mode: str = "train"):
             "device": device,
             "loader_mode": config["train"]["loader_mode"],
         }
-        return model_params, optimizer_params, scheduler_params, clip_grad_params, tokens_params, run_params
+        return model_params, model_path, optimizer_params, scheduler_params, clip_grad_params, tokens_params, run_params
     if mode == "generate":
-        model_path = Path(config["model"]["load_prefix"]).expanduser() / config["model"]["load_name"]
         tokenizer_params = {
             "input_path": None,
             "vocab_size": None,
@@ -331,7 +341,6 @@ def parse_config(config, mode: str = "train"):
         vocab_merges_path = Path(config["tokenizer"]["files_path"]).expanduser()
         return model_params, model_path, tokenizer_params, vocab_merges_path
     if mode == "eval":
-        model_path = Path(config["model"]["load_prefix"]).expanduser() / config["model"]["load_name"]
         tokens_path = Path(config["data"]["path"]).expanduser()
         return model_params, model_path, tokens_path
 
