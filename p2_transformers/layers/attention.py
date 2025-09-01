@@ -32,7 +32,7 @@ class MultiHeadSelfAttention(nn.Module):
         nn.init.trunc_normal_(data, mean=0.0, std=std, a=-3.0 * std, b=3.0 * std)
         self.P_O = nn.Parameter(data)
         # init RoPE
-        self.rope = RoPE(theta = theta, d_k = self.d_k, max_seq_len= context_length, device=device, dtype = dtype)
+        self.rope = RoPE(theta = theta, d_k = self.d_k, max_seq_len= context_length, device=device, dtype = dtype) if theta is not None else None
         self.device = device
 
     def forward(self, x: torch.Tensor, is_masked: bool = True, with_rope = True, token_positions = None):
@@ -44,7 +44,7 @@ class MultiHeadSelfAttention(nn.Module):
         V = einsum(x, self.P_V, "... d, hd_v d -> ... hd_v")
         V = rearrange(V, "...  seq_len (h d_v) -> ... h seq_len d_v", h = self.num_heads)
         # apply RoPE
-        if with_rope:
+        if with_rope and self.rope is not None:
             Q = self.rope(Q)
             K = self.rope(K)
         # create mask

@@ -54,7 +54,7 @@ def cross_entropy(logits: torch.Tensor, target: torch.Tensor, z_alpha:float = 0.
     return torch.mean(losses)
 
 def perplexity(logits: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-    return torch.exp(cross_entropy(logits, target))
+    return torch.exp(cross_entropy(logits, target, 0.0))
 
 def cosine_lr_schedule(t: int, lr_max: float, lr_min: float, warmup_iters: int, cosine_cycle_iters: int):
     assert warmup_iters >= 0, f"Invalid warmup iterations: {warmup_iters}"
@@ -303,7 +303,8 @@ def parse_config(config, mode: str = "train"):
         }
 
         # run parameters
-        model_str = f"dmodel_{model_params['d_model']}_dff_{model_params['d_ff']}_numlayers_{model_params['num_layers']}_numheads_{model_params['num_heads']}_cntx_{cntx}"
+        rope_str = "" if model_params["theta"] is not None else "_no_rope"
+        model_str = f"dmodel_{model_params['d_model']}_dff_{model_params['d_ff']}_numlayers_{model_params['num_layers']}_numheads_{model_params['num_heads']}_cntx_{cntx}{rope_str}"
         sched_name = config["optimizer"]["scheduler"]["name"]
         sched_str = f"{sched_name}/steps_{steps}/warmup_{warmup_iters}"
         optim_suffix = "_tr" if config["optimizer"]["is_trust_ratio"] else ""
@@ -313,7 +314,8 @@ def parse_config(config, mode: str = "train"):
         dataset_name = Path(config["dataset_path"]["prefix"]).name
         ts_str = datetime.now().strftime('%Y%m%d_%H%M%S')
         loss_eval = "init" if model_path is None else '{}'
-        run_name = f"{dataset_name}/{device_name}/exp_bs_{bs}_step_bs_{os_bs}/loss_{loss_eval}/{sched_str}/{optim_str}/{model_str}/{ts_str}"
+        abl_str = f"z_{clean(config["train"]["z_alpha"])}"
+        run_name = f"{dataset_name}/{abl_str}/{device_name}/exp_bs_{bs}_step_bs_{os_bs}/loss_{loss_eval}/{sched_str}/{optim_str}/{model_str}/{ts_str}"
 
 
         serialize_freq = min(config["serialize"]["frequency"] // config["validate"]["frequency"], 1) * config["validate"]["frequency"]
@@ -330,6 +332,7 @@ def parse_config(config, mode: str = "train"):
             "run_name": run_name,
             "device": device,
             "loader_mode": config["train"]["loader_mode"],
+            "z_alpha": config["train"]["z_alpha"]
         }
         return model_params, model_path, optimizer_params, scheduler_params, clip_grad_params, tokens_params, run_params
     if mode == "generate":
