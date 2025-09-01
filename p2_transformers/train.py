@@ -11,8 +11,7 @@ from datetime import datetime
 import numpy as np
 
 from models import TransformerLM
-from utils import * #parse_config, cross_entropy, cosine_lr_schedule, get_start_seqs, data_loading, get_valid_loss, gradient_clipping, save_checkpoint, load_checkpoint, get_short_gpu_name, get_optim
-
+from utils import *
 
 seed = 123
 torch.manual_seed(seed)
@@ -157,7 +156,8 @@ def main(config):
         f"device={get_short_gpu_name(config["device"])} | "
         f"optim={optim_name} | "
         f"steps={run_params['steps']} | "
-        f"warmup={scheduler_params['warmup_iters']}"
+        f"warmup={scheduler_params['warmup_iters']} | "
+        f"z_alpha={run_params['z_alpha']} | "
     )
 
     # get experiments
@@ -173,7 +173,10 @@ def main(config):
     }
     print(f"Model parameters: {count_parameters(model):,}")
     print(f"Loader size: train={tokens['train'].shape[0]:,} | validate={tokens['valid'].shape[0]:,}")
-    loss_fn = cross_entropy # TODO: probably, it makes sense to automate
+    
+    # create loss
+    def loss_fn(logits: torch.Tensor, target: torch.Tensor, z_alpha:float = run_params["z_alpha"]):
+        return cross_entropy(logits, target, float(z_alpha))
     
     # run training loop
     train_loop(model, optimizer, tokens, loss_fn, scheduler_params, max_norm, run_params, config)
@@ -190,8 +193,19 @@ if __name__ == '__main__':
 
     with open(inputs.config, 'r') as stream:
         config = yaml.safe_load(stream)
-    config["optimizer"]["lr"] = 17e-4
-    main(config)
+    # config["optimizer"]["lr"] = 5e-2
+    # config["optimizer"]["scheduler"]["warmup_iters"] = 0.01
+    # config["train"]["optim_step_batch_size"] = 2560
+    # config["optimizer"]["is_trust_ratio"] = True
+    config["device"] = 1
+    config["optimizer"]["lr"] = 1e-3
+    config["optimizer"]["scheduler"]["warmup_iters"] = 0.05
+    config["train"]["total_tokens_processed"] = 10 * 32_768_000
+    # main(config)
+    for norm_before, norm_after in [["RMSNorm", "RMSNorm"]]: # [[None, "RMSNorm"], ["RMSNorm", None], ["RMSNorm", "RMSNorm"]]:
+        config["model"]["norms"]["before"] = norm_before
+        config["model"]["norms"]["after"] = norm_after
+        main(config)
 
     # TODO: remove it
     # config["optimizer"]["weight_decay"] = 5e-4

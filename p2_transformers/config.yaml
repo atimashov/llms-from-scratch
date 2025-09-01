@@ -1,7 +1,7 @@
 seed: 123
 dataset_path:
   prefix: '~/ai_projects/data/TinyStoriesV2-GPT4'
-  raw_data: 'raw_data'
+  # raw_data: 'raw_data'
   tokenized: 'tokenized'
 device: 0 # currently no distributed training
 model:
@@ -13,12 +13,20 @@ model:
   num_layers: 4
   num_heads: 16 # 17M non-embedding parameters
   dtype: float32
+  norms: # can be either 'RMSNorm', 'LayerNorm', None
+    before: 'RMSNorm' 
+    after: None
+    residual: Null
+    final: 'RMSNorm'
+  # load_prefix: "~/ai_projects/Natural_Language_Processing/p2_transformers/weights/TinyStoriesV2-GPT4/RTX5090"
+  # load_name: "exp_bs_64_step_bs_64/loss_init/cosine/steps_40000/warmup_2000/Lion/lrmax5e-4_lrmin5e-5_wdecay5e-4/dmodel_512_dff_1344_numlayers_4_numheads_16_cntx_256/20250830_203010/ckpt_best.pt"
+  # load_name: "exp_bs_64_step_bs_64/loss_init/cosine/steps_40000/warmup_2000/Lion_tr/lrmax3e-3_lrmin3e-4_wdecay5e-4/dmodel_512_dff_1344_numlayers_4_numheads_16_cntx_256/20250830_203128/ckpt_best.pt"
 optimizer:
-  name: 'Lion' # 'AdamW'
+  name:  'Lion' # 'AdamW' # 'Lion' #
   lr: 3e-4 # 5e-3 # 1e-3 # 2e-5 - 5e-5
   beta: 0.9
-  beta1: 0.98 # 0.9
-  beta2: 0.92 # 0.999
+  beta1: 0.9 # 0.98 # 
+  beta2: 0.999 # 0.92 # 
   beta3: 0.99
   epsilon: 1e-8
   weight_decay: 0.0005
@@ -26,16 +34,17 @@ optimizer:
   is_trust_ratio: False
   scheduler:
     name: cosine
-    lr_min: 3e-5 # 1e-6
+    lr_min: 0.0 # 3e-5 # 1e-6
     warmup_iters: 0.05
     cosine_cycle_iters: 1.0
   clip_gradient:
     max_norm: 1.0
 train:
-  total_tokens_processed: 327_680_000 # batch_size x step_count x context_length
+  total_tokens_processed:  655_360_000 #983_040_000 # 327_680_000 #  batch_size x step_count x context_length
   batch_size: 64
-  optim_step_batch_size: 1280
-  loader_mode: 'in_memory_ids' # 'sample' # , 
+  optim_step_batch_size: 64 # 2560 # 1280
+  loader_mode: 'in_memory_ids' # 'sample' # ,
+  z_alpha: 0.0 # 1e-4
 validate:
   frequency: 0.1 # assumed that we don't have gradient accumulation
   num_samples: 64_000 # '-1' means the full validation set

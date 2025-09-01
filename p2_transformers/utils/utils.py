@@ -264,11 +264,11 @@ def parse_config(config, mode: str = "train"):
         "theta": config["model"]["rope_theta"],
         "context_length": config["model"]["context_length"],
         "vocab_size": config["model"]["vocab_size"],
+        "norms": config["model"]["norms"],
         "device": device,
         "dtype": dtype_map[config["model"]["dtype"]]
     }
     model_path = None if "load_prefix" not in config["model"] else Path(config["model"]["load_prefix"]).expanduser() / config["model"]["load_name"]
-
     if mode == "train":
         # run's and scheduler's variables
         assert "optim_step_batch_size" not in config["train"] or config["train"]["optim_step_batch_size"] % config["train"]["batch_size"] == 0, "'optim step batch size' should be divisible by 'batch size'"
