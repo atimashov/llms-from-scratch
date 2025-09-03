@@ -6,6 +6,7 @@ from pathlib import Path
 import pickle
 import numpy as np
 import os
+from tqdm import tqdm
 # import atexit
 
 # from utils.profiling import _log_worker_memory, _print_final_worker_stats
@@ -14,16 +15,18 @@ from .base import Tokenizer
 _MERGES = None
 _TOKENS2ID = None
 _PAT = None
+_FILE_PATH = None
 
 # atexit.register(_print_final_worker_stats)
 
-def _init_global_vars(merges, tokens2id, pattern):
+def _init_global_vars(merges, tokens2id, pattern, file_path = None):
     # NOTE: to avoid pickling the whole "self" it is necessary to process outside of the class
     # it makes run 5x faster and saves memory consumption 4x.
-    global _MERGES, _TOKENS2ID, _PAT
+    global _MERGES, _TOKENS2ID, _PAT, _FILE_PATH
     _MERGES = merges
     _TOKENS2ID = tokens2id
     _PAT = pattern
+    _FILE_PATH = file_path
 
 def _encode_pretoken(pretoken: str, merges: dict, tokens2id: dict):
     b = pretoken.encode("utf-8")
@@ -55,8 +58,20 @@ def _encode_doc(is_st: bool, doc: str):
     for m in _PAT.finditer(doc):
         pretoken = m.group(0)
         tokens_ids.extend(_encode_pretoken(pretoken, _MERGES, _TOKENS2ID))
-
     # _log_worker_memory("NEW")
+    return tokens_ids
+
+def _encode_doc_new(is_st: bool, init_pos: int, doc_size = int):
+    with open(_FILE_PATH, "rb") as f:
+        f.seek(init_pos)
+        doc_bytes = f.read(doc_size)
+
+        if is_st:
+            return [_TOKENS2ID[doc_bytes]]
+        tokens_ids = []
+        for m in _PAT.finditer(doc_bytes.decode("utf-8")):
+            pretoken = m.group(0)
+            tokens_ids.extend(_encode_pretoken(pretoken, _MERGES, _TOKENS2ID))
     return tokens_ids
 
 class BPETokenizer(Tokenizer):
@@ -106,6 +121,66 @@ class BPETokenizer(Tokenizer):
                 pos = end
             if pos < len(data):
                 yield True, False, data[pos:]
+
+    # def find_docs_boundaries(self, file_path, desired_num_chunks = 4800):
+    #     st_pat = b"(" + b"|".join(re.escape(tok.encode("utf-8")) for tok in self.special_tokens) + b")" # TODO: move it to init
+    #     pat = re.compile(st_pat)
+        
+    #     docs_meta = []
+
+    #     with open(file_path, "rb") as f:
+    #         # find chunk boundaries
+    #         boundaries = self.find_chunk_boundaries(f, desired_num_chunks)
+    #         chunks_meta = [(start, end - start) for start, end in zip(boundaries[:-1], boundaries[1:])]
+        
+    #         # find docs and special tokens boundaries
+    #         for init_pos, chunk_size in chunks_meta:
+    #             f.seek(init_pos)  # Start at boundary guess
+    #             chunk_bytes = f.read(chunk_size)
+    #             chunk_str = chunk_bytes.decode("utf-8", errors="ignore")
+                
+    #             pos = 0
+    #             for m in pat.finditer(chunk_str):
+    #                 start, end = m.span()
+    #                 if pos < start:
+    #                     docs_meta.append((False, init_pos + pos, start - pos))
+    #                 docs_meta.append((True, init_pos + start, end - start))
+    #                 pos = end
+    #             if pos < len(chunk_str):
+    #                 docs_meta.append((False, init_pos + pos, len(chunk_str) - pos))
+    #     return docs
+
+
+    def find_docs_boundaries(self, file_path, desired_num_chunks = 4800):        
+        docs_meta = []
+
+        with open(file_path, "rb") as f:
+            # find chunk boundaries
+            boundaries = self.find_chunk_boundaries(f, desired_num_chunks)
+            chunks_meta = [(start, end - start) for start, end in zip(boundaries[:-1], boundaries[1:])]
+            
+            for st_bytes in [tok.encode("utf-8") for tok in self.special_tokens]:
+                frontier_meta = []
+                for init_pos, chunk_size in chunks_meta:
+                    f.seek(init_pos)
+                    chunk_bytes = f.read(chunk_size)
+                    start = 0
+                    while True:
+                        idx = chunk_bytes.find(st_bytes, start)
+                        if idx == -1:
+                            frontier_meta.append((init_pos + start, len(chunk_bytes) - start))
+                            break
+                        docs_meta.append((True, init_pos + idx, len(st_bytes)))
+                        if idx > start:
+                            frontier_meta.append((init_pos + start, idx - start))
+                        start = idx + len(st_bytes)
+                chunks_meta = frontier_meta.copy()
+
+            for init_pos, chunk_size in chunks_meta:
+                docs_meta.append((False, init_pos, chunk_size))
+        return sorted(docs_meta, key = lambda x: x[1])
+
+
 
     def pretokenize_chunk(self, start: int, end: int):
         """
@@ -192,7 +267,6 @@ class BPETokenizer(Tokenizer):
                 pair = pretokens_tuple[i_pos:(i_pos + 2)]
                 # update pairs counter
                 self.pairs_cnt[pair] = self.pairs_cnt.get(pair, 0) + occur
-                                
                 # update pairs positions
                 if pair == prev_pair:  # to avoid duplicating the same pair (e.g. rrrrrrrr)
                     prev_pair = None
@@ -203,6 +277,7 @@ class BPETokenizer(Tokenizer):
                     self.pairs_pos[pair][i_pretoken] = []
                 self.pairs_pos[pair][i_pretoken].append(i_pos)
                 prev_pair = pair  # to avoid duplicating the same pair (e.g. rrrrrrrr)
+ 
         return self.pairs_cnt, self.pairs_pos
 
     def update_pretoken(self, pair: tuple, pretoken_idx: int):
@@ -303,11 +378,13 @@ class BPETokenizer(Tokenizer):
         # step 1: init counter one time
         self.init_pairs()
         t = perf_counter()
-        while self.cur_vsize < self.vocab_size:
+        loop = tqdm(range(self.vocab_size - self.cur_vsize), leave = True, desc = "Tokenizer training")
+        for _ in loop:
             best_pair, _ = self.train_step()
+            loop.set_postfix(curr_vocab_size=f"{self.cur_vsize}/{self.vocab_size}")
         print(f"⏱️ Merges: time={perf_counter() - merge_start:.2f}s") 
         
-    def encode(self, text: str, lazy_out_path: str | None = None, num_processes: int = 24) -> list[int] | None:
+    def encode_prev(self, text: str, lazy_out_path: str | None = None, num_processes: int = 24) -> list[int] | None:
         """
         Encode a full text string to a list of token IDs.
 
@@ -368,6 +445,41 @@ class BPETokenizer(Tokenizer):
             if fout:
                 fout.close()
         return ids_encoded if len(ids_encoded) > 0 else None
+
+    def encode(self, file_path: str, lazy_out_path: str | None = None, num_processes: int = 24) -> list[int] | None:
+        """
+        Encode a full text string to a list of token IDs.
+
+        Args:
+            text (str): Input text to tokenize.
+            num_processes (int): Parallelism level for pretoken encoding.
+
+        Returns:
+            list[int]: Token IDs after applying merges or None if lazy writes are performed.
+        """
+
+        docs_meta = self.find_docs_boundaries(file_path, desired_num_chunks = 4800)
+        print("-->", len(docs_meta))
+
+        # iterate over documents
+        dtype = np.uint16 if self.vocab_size <= 65536 else np.uint32
+
+        with Pool(num_processes, initializer=_init_global_vars, initargs=(self.merges, self.tokens2id, re.compile(self.PAT), file_path)) as p:
+            chunk_size = num_processes * 400
+            ids_encoded = []
+            
+            loop = tqdm(range(0, len(docs_meta), chunk_size), leave = True, desc = "Encoding", unit="chunks")
+            for i in loop:
+                docs_meta_chunk = docs_meta[i: i + chunk_size]
+                # run 
+                pretokens_encoded = p.starmap(_encode_doc_new, docs_meta_chunk)
+                # merge results
+                for ids_pretoken in pretokens_encoded:
+                    ids_encoded.extend(ids_pretoken)
+                loop.set_postfix(tokens_encoded=len(ids_encoded))
+        return ids_encoded if len(ids_encoded) > 0 else None
+
+
     
     def encode_iterable(self, iterable: Iterator[str]) -> Iterator[int]:
         """

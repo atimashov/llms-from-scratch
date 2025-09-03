@@ -19,10 +19,11 @@ class Tokenizer(ABC):
         self.PAT = self._default_pattern()
 
         # init vocab
-        self._init_vocab()
-        # init vocab sizes
-        self.cur_vsize = len(self.vocab)
-        self.vocab_size = vocab_size
+        if input_path is not None:
+            self._init_vocab()
+            # init vocab sizes
+            self.cur_vsize = len(self.vocab)
+            self.vocab_size = vocab_size
 
         # init merges
         self.merges = {}
@@ -111,6 +112,7 @@ class Tokenizer(ABC):
         for i, t in self.vocab.items():
             self.tokens2id[t] = i
         # update vocab size
+        self.cur_vsize = len(self.vocab)
         self.vocab_size = len(self.vocab)
         # deserialize merges
         if merges_path:
