@@ -1,17 +1,20 @@
-# Natural Language Processing
-In this repo, I implement foundational and cutting-edge papers in NLP, from classic word embeddings to large multimodal models.
+# LLMs From Scratch
+This repository is a structured deep-dive into implementing a Large Language Model from scratch — inspired by Stanford’s [CS336: Large Language Models](https://stanford-cs336.github.io/) and Karpathy’s [Neural Networks: Zero to Hero](https://www.youtube.com/watch?v=VMj-3S1tku0)
+
+It combines theory + code, building all components from low-level tokenizers to Transformer architectures, training loops, and sampling strategies.
+Some of the blogs related to this repo are on my [website](https://timashov.ai).
 
 ## 📚 Table Of Contents
-- [1. NLP Refresher: Pre-Transformer Ideas](#nlp-refresher)
+- [1. Core](#core)
   - [Tokenizers](#tokenizers)
   - [Optimizers](#optimizers)
-  - [Word Embeddings](./p1_pre_transformer/word_embeddings/README.md)
-    <br>Foundational techniques for learning word embeddings: **Word2Vec** and **GloVe**.
-  - [Recurrent Neural Networks](#rnn)
-  - [Sequence to Secuence](#seq2seq) 
-- [2. Transformers](#transformers)
-- [3. LLMs](#llms)
-- [4. VLMs](#vlms)
+  - [Layers](#layers)
+- [2. Efficiency](#efficiency)
+- [3. Scaling](#scaling)
+- [4. Data Pipelines](#data)
+- [5. Finetuning](#finetuning)
+- [6. Alignment](#alignment)
+- [7. Inference](#inference)
 
 ## 📘 Resources Used
 
