@@ -31,14 +31,16 @@ def train_loop(model, optimizer, tokens, loss_fn, scheduler_params, max_norm, ru
     device = run_params["device"]
     loader_mode = run_params["loader_mode"]
     lr = scheduler_params["lr_max"]
+    num_tokens = tokens["train"].shape[0]
     
     # init indices
     if loader_mode == "sample":
         im_ids = None
     elif loader_mode == "in_memory_ids":
         t = perf_counter()
-        im_ids = np.arange(tokens["train"].shape[0] - context_length, dtype = np.int32)
-        np.random.shuffle(im_ids)
+        # im_ids = np.arange(num_tokens - context_length, dtype = np.int32)
+        # np.random.shuffle(im_ids)
+        im_ids = np.random.choice(num_tokens - context_length, size=min(steps * os_bs, num_tokens), replace=False)
         print(f"⏱️ Created and shuffled in-memory ids: {im_ids.shape[0]:,} tokens. Time={perf_counter() - t:.2f}s") 
 
     # init logging and serialization
@@ -198,14 +200,16 @@ if __name__ == '__main__':
     # config["train"]["optim_step_batch_size"] = 2560
     # config["optimizer"]["is_trust_ratio"] = True
     config["device"] = 1
-    config["optimizer"]["lr"] = 1e-3
+    config["optimizer"]["lr"] = 1e-4
     config["optimizer"]["scheduler"]["warmup_iters"] = 0.05
-    config["train"]["total_tokens_processed"] = 10 * 32_768_000
-    # main(config)
-    for norm_before, norm_after in [["RMSNorm", "RMSNorm"]]: # [[None, "RMSNorm"], ["RMSNorm", None], ["RMSNorm", "RMSNorm"]]:
-        config["model"]["norms"]["before"] = norm_before
-        config["model"]["norms"]["after"] = norm_after
-        main(config)
+    config["train"]["total_tokens_processed"] = 32_768_000 * 10 * 4
+    main(config)
+    # for norm_before, norm_after in [[None, "RMSNorm"]]: # [[None, "RMSNorm"], ["RMSNorm", None], ["RMSNorm", "RMSNorm"]]:
+    #     for lr in [5e-4, 1e-4, 5e-5]:
+    #         config["model"]["norms"]["before"] = norm_before
+    #         config["model"]["norms"]["after"] = norm_after
+    #         config["optimizer"]["lr"] = lr
+    #         main(config)
 
     # TODO: remove it
     # config["optimizer"]["weight_decay"] = 5e-4
