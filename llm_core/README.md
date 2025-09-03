@@ -1,19 +1,20 @@
 # LLMs from Scratch: Core
-This folder implements core components for training Large Language Models (LLMs) from scratch. Which means at maximum I use
-- `torch.nn.Module` basic Module
-- `torch.optim.Optimizer` basic class
-- some basic functions
-Majority is implemented using basic math operations.
+This module implements the **core components** of Large Language Models (LLMs) entirely from scratch — with minimal dependencies.
 
-I cover:
+At maximum, it uses:
+- `torch.nn.Module` and `torch.optim.Optimizer` as base classes
+- Low-level PyTorch tensor ops and math functions
 
+Evyrything else - from tokenization to attention and optimization — is **custom implemented**.
+
+## ✅ Covered
 - Tokenization (custom BPE with parallel processing)
 - Optimizers (SGD, Momentum, Adam, AdamW, Adan, Lion, LARS)
 - Training loop
 - Configurable Transformer architecture including Attention, Rope, LayerNorm, RMSNorm etc.
 - Dataset loaders (TinyStories, OpenWebText)
 
-## Setup 
+## ⚙️ Setup 
 ### 1. Download the dataset (CS336 based)
 Run from the root of the project (e.g. `NATURAL_LANGUAGE_PROCESSING`):
 
