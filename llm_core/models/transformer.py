@@ -3,8 +3,8 @@ import torch
 from torch import nn
 from einops import rearrange, einsum
 
-from utils import scaled_dot_product_attention, softmax
-from layers import Embedding, Linear, RMSNorm, LayerNorm, SwiGLUFFN, MultiHeadSelfAttention
+from utils import softmax
+from layers import Embedding, Linear, RMSNorm, LayerNorm, GatedFFN, FFN, MultiHeadSelfAttention
 
     
 class Transformer(nn.Module):
@@ -13,7 +13,7 @@ class Transformer(nn.Module):
     num_heads: int Number of heads to use in multi-head self-attention.
     d_ff: int Dimensionality of the position-wise feed-forward inner layer.
     """
-    def __init__(self, d_model: int, num_heads: int, d_ff: int, theta: float = 10000.0, context_length = 10000, norms: dict | None = None, device: torch.device | None = None, dtype: torch.dtype | None = None):
+    def __init__(self, d_model: int, d_ff: int, num_heads: int, activation: str, is_gate: bool, theta: float = 10000.0, context_length = 10000, norms: dict | None = None, device: torch.device | None = None, dtype: torch.dtype | None = None):
         super().__init__()
         assert norms.get("before", None) in {"RMSNorm", "LayerNorm", None}
         assert norms.get("after", None) in {"RMSNorm", "LayerNorm", None}
@@ -39,7 +39,8 @@ class Transformer(nn.Module):
             self.res_ln2 = RMSNorm(d_model=d_model, device=device, dtype=dtype) if norms["residual"] == "RMSNorm" else LayerNorm(d_model=d_model, device=device, dtype=dtype)
         
         self.attn = MultiHeadSelfAttention(d_model = d_model, num_heads = num_heads, theta = theta, context_length = context_length, device = device, dtype = dtype)
-        self.ffn = SwiGLUFFN(d_model = d_model, d_hidden = d_ff, device = device, dtype = dtype)
+        ffn = GatedFFN if is_gate else FFN
+        self.ffn = ffn(d_model = d_model, d_hidden = d_ff, activation = activation, device = device, dtype = dtype)
 
     def forward(self, x: torch.Tensor):
         # apply the first block (Multi Head Self Attention)
@@ -55,13 +56,13 @@ class TransformerLM(nn.Module):
     the position embedding matrix.
     num_layers: int The number of Transformer blocks to use.
     """
-    def __init__(self, d_model: int, d_ff: int, num_heads: int, num_layers:int = 6, theta: float = 10000.0, context_length = 256, vocab_size: int = 10_000, norms: dict | None = None, device: torch.device | None = None, dtype: torch.dtype | None = None):
+    def __init__(self, d_model: int, d_ff: int, num_heads: int, activation: str, is_gate: bool, num_layers:int = 6, theta: float = 10000.0, context_length = 256, vocab_size: int = 10_000, norms: dict | None = None, device: torch.device | None = None, dtype: torch.dtype | None = None):
         super().__init__()
         assert norms.get("final", None) in {"RMSNorm", "LayerNorm", None}
         self.context_length = context_length
         self.token_embeddings = Embedding(num_embeddings = vocab_size, embedding_dim = d_model, device = device, dtype = dtype)
         self.layers = nn.Sequential(
-            *[Transformer(d_model = d_model, num_heads = num_heads, d_ff = d_ff, theta = theta, context_length = context_length, norms = norms, device = device, dtype = dtype) for _ in range(num_layers)]
+            *[Transformer(d_model = d_model, d_ff = d_ff, num_heads = num_heads, activation = activation, is_gate = is_gate, theta = theta, context_length = context_length, norms = norms, device = device, dtype = dtype) for _ in range(num_layers)]
         )
         self.ln_final = RMSNorm(d_model=d_model, device=device, dtype=dtype)
         if norms["final"] is None:

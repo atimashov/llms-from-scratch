@@ -1,4 +1,4 @@
-# LLMs from Scratch: Core
+# 🧠 LLMs from Scratch: Core
 This module implements the **core components** of Large Language Models (LLMs) entirely from scratch — with minimal dependencies.
 
 At maximum, it uses:

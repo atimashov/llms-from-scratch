@@ -38,8 +38,6 @@ def train_loop(model, optimizer, tokens, loss_fn, scheduler_params, max_norm, ru
         im_ids = None
     elif loader_mode == "in_memory_ids":
         t = perf_counter()
-        # im_ids = np.arange(num_tokens - context_length, dtype = np.int32)
-        # np.random.shuffle(im_ids)
         im_ids = np.random.choice(num_tokens - context_length, size=min(steps * os_bs, num_tokens), replace=False)
         print(f"⏱️ Created and shuffled in-memory ids: {im_ids.shape[0]:,} tokens. Time={perf_counter() - t:.2f}s") 
 
@@ -148,19 +146,23 @@ def main(config):
     print()
     optim_suffix = "_tr" if config["optimizer"]["name"] in {"Lion"} and config["optimizer"]["is_trust_ratio"] else ""
     optim_name = config["optimizer"]["name"] + optim_suffix
+    dataset_name = Path(config["dataset_path"]["prefix"]).name
+    print(f"Run started at {curr_time.strftime("%H:%M:%S")}.")
     print(
-        f"Run started at {curr_time.strftime("%H:%M:%S")}: bs={run_params['batch_size']} | "
+        f"Dataset: {dataset_name} | bs={run_params['batch_size']} | "
         f"optim_step_bs={run_params['optimizer_step_batch_size']} | "
+        f"context={run_params['context_length']} | "
+        f"optim={optim_name} | "
+        f"warmup={scheduler_params['warmup_iters']} | "
         f"lr_max={clean(scheduler_params['lr_max'])} | "
         f"lr_min={clean(scheduler_params['lr_min'])} | "
         f"w_decay={clean(optimizer_params['weight_decay'])} | "
-        f"context={run_params['context_length']} | "
+        f"z_alpha={run_params['z_alpha']} | "        
         f"device={get_short_gpu_name(config["device"])} | "
-        f"optim={optim_name} | "
         f"steps={run_params['steps']} | "
-        f"warmup={scheduler_params['warmup_iters']} | "
-        f"z_alpha={run_params['z_alpha']} | "
+        f"activation: {'Gated ' if model_params['is_gate'] else ''}{model_params['activation']} | "    
     )
+    print_d_model_d_ff(model_params["d_model"], model_params["d_ff"], model_params['is_gate'])
 
     # get experiments
     model = TransformerLM(**model_params).to(model_params["device"]) # NOTE: I sent to device explicitely. Not sure if it makes sense.
@@ -173,7 +175,10 @@ def main(config):
         "train": np.load(tokens_params["train"], mmap_mode='r'),
         "valid": np.load(tokens_params["valid"], mmap_mode='r')
     }
-    print(f"Model parameters: {count_parameters(model):,}")
+    print(
+        f"Model parameters: {count_parameters(model):,} | "
+        f"d_model={model_params["d_model"]:,} | "
+        f"d_ff={model_params["d_ff"]:,} |")
     print(f"Loader size: train={tokens['train'].shape[0]:,} | validate={tokens['valid'].shape[0]:,}")
     
     # create loss
@@ -195,52 +200,7 @@ if __name__ == '__main__':
 
     with open(inputs.config, 'r') as stream:
         config = yaml.safe_load(stream)
-    # config["optimizer"]["lr"] = 5e-2
-    # config["optimizer"]["scheduler"]["warmup_iters"] = 0.01
-    # config["train"]["optim_step_batch_size"] = 2560
-    # config["optimizer"]["is_trust_ratio"] = True
     config["device"] = 1
-    config["optimizer"]["lr"] = 1e-4
-    config["optimizer"]["scheduler"]["warmup_iters"] = 0.05
-    config["train"]["total_tokens_processed"] = 32_768_000 * 10 * 4
+    config["model"]["activation"] = "SqReLU"
     main(config)
-    # for norm_before, norm_after in [[None, "RMSNorm"]]: # [[None, "RMSNorm"], ["RMSNorm", None], ["RMSNorm", "RMSNorm"]]:
-    #     for lr in [5e-4, 1e-4, 5e-5]:
-    #         config["model"]["norms"]["before"] = norm_before
-    #         config["model"]["norms"]["after"] = norm_after
-    #         config["optimizer"]["lr"] = lr
-    #         main(config)
-
-    # TODO: remove it
-    # config["optimizer"]["weight_decay"] = 5e-4
-    # for lr_max, lr_min in [[3e-4, 3e-6], [3e-5, 3e-7]]: # [[5e-5, 5e-7], [5e-6, 5e-8]]: # 
-    #     config["optimizer"]["lr"] = lr_max # 3e-3 # 1e-2 # 3e-4
-    #     config["optimizer"]["scheduler"]["lr_min"] = lr_min  # 1e-3 # 3e-5
-    #     config["train"]["optim_step_batch_size"] = 64
-    #     for warmup_iters in [0.05, 0]:
-    #         config["optimizer"]["scheduler"]["warmup_iters"] = warmup_iters
-    #         main(config)
-    # TODO: remove it
-
-
-    # # testing AdamW
-    # for weight_decay in [5e-4, 1e-4, 0]: # 1e-2, 1e-3, 
-    #     config["optimizer"]["weight_decay"] = weight_decay
-    #     for lr in [1e-3, 1e-4]:
-    #         config["optimizer"]["lr"] = lr
-    #         for lr_min in [1e-3, 1e-5, 1e-7]:
-    #             config["optimizer"]["scheduler"]["lr_min"] = lr_min
-    #             for optim_step_batch_size in [64]: #[1280, 64]:
-    #                 config["train"]["optim_step_batch_size"] = optim_step_batch_size
-    #                 main(config)
-
-    # testing trust ratio in Lion
-    # for lr in [6e-3]:
-    #     config["optimizer"]["lr"] = lr
-    #     config["optimizer"]["scheduler"]["lr_min"] = lr / 10
-    #     for is_trust_ratio in [True]: # [False, True]:
-    #         config["optimizer"]["is_trust_ratio"] = is_trust_ratio
-    #         for optim_step_batch_size in [64]: #[1280, 64]:
-    #             config["train"]["optim_step_batch_size"] = optim_step_batch_size
-    #             main(config)
     

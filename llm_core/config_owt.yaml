@@ -1,16 +1,16 @@
 seed: 123
 dataset_path:
-  prefix: '~/ai_projects/data/TinyStoriesV2-GPT4'
+  prefix: '~/ai_projects/data/OpenWebText'
   # raw_data: 'raw_data'
   tokenized: 'tokenized'
 device: 0 # currently no distributed training
 model:
-  vocab_size: 10_000
-  context_length: 256
+  vocab_size: 32_000
+  context_length: 384 # 256
   d_model: 512 # 768 (dimensions used in many small Transformer papers)
-  d_ff: 2048 # 1344 # ~8/3 d_model; 64x, which is good for GPU performance.
+  d_ff: 1344 # ~8/3 d_model; 64x, which is good for GPU performance.
   activation: "SiLU"
-  is_gate: False
+  is_gate: True
   rope_theta: 10_000
   num_layers: 4
   num_heads: 16 # 17M non-embedding parameters
@@ -25,7 +25,7 @@ model:
   # load_name: "exp_bs_64_step_bs_64/loss_init/cosine/steps_40000/warmup_2000/Lion_tr/lrmax3e-3_lrmin3e-4_wdecay5e-4/dmodel_512_dff_1344_numlayers_4_numheads_16_cntx_256/20250830_203128/ckpt_best.pt"
 optimizer:
   name:  'Lion' # 'AdamW' # 'Lion' #
-  lr: 1e-3 # 5e-3 # 1e-3 # 2e-5 - 5e-5
+  lr: 3e-4 # 5e-3 # 1e-3 # 2e-5 - 5e-5
   beta: 0.9
   beta1: 0.9 # 0.98 # 
   beta2: 0.999 # 0.92 # 
@@ -37,12 +37,12 @@ optimizer:
   scheduler:
     name: cosine
     lr_min: 0.0 # 3e-5 # 1e-6
-    warmup_iters: 0.01
+    warmup_iters: 0.05
     cosine_cycle_iters: 1.0
   clip_gradient:
     max_norm: 1.0
 train:
-  total_tokens_processed:  327_680_000 # 655_360_000 #983_040_000  batch_size x step_count x context_length
+  total_tokens_processed:  655_360_000 #983_040_000 # 327_680_000 #  batch_size x step_count x context_length
   batch_size: 64
   optim_step_batch_size: 64 # 2560 # 1280
   loader_mode: 'in_memory_ids' # 'sample' # ,

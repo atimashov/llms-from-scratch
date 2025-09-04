@@ -19,20 +19,6 @@ def softmax(x: torch.Tensor, dim: int, tau: float = 1.0) -> torch.Tensor:
     exps = torch.exp((x - x_max) / tau)
     return exps / torch.sum(exps, dim = dim, keepdim=True)
 
-def scaled_dot_product_attention(Q: torch.Tensor, K: torch.Tensor, V: torch.Tensor, mask: torch.Tensor | None):
-    """
-    Q, K:  (batch_size, ..., seq_len, d_k)
-    V:  (batch_size, ..., seq_len, d_v)
-    """
-    d_k = K.shape[-1]
-    # seq_len is the same for both, but I distinguish the ordering
-    scores = einsum(Q, K, "... seq_len_q d_k, ... seq_len_k d_k -> ... seq_len_q seq_len_k") 
-    if mask is not None:
-        scores = scores.masked_fill(~mask, float('-inf'))
-    weights = softmax(scores / (d_k ** 0.5), dim = -1)
-    att = einsum(weights, V, "... seq_len seq_len2, ... seq_len2 d_v -> ... seq_len d_v")
-    return att
-
 def cross_entropy(logits: torch.Tensor, target: torch.Tensor, z_alpha:float = 0.0) -> torch.Tensor:
     assert logits.shape[:-1] == target.shape, "logits and target shape dimension mismatch"
     # Flatten all dimensions except vocab
@@ -256,13 +242,19 @@ def parse_config(config, mode: str = "train"):
 
     # model parameters
     assert config["model"]["dtype"] in dtype_map, f"Type you provided is not supported: {config["model"]["dtype"]}"
+    assert config["model"]["activation"] in {"ReLU", "LeakyReLU", "SqReLU", "SiLU", "GELU"}, f"Type you provided is not supported: {config["model"]["activation"]}"
+    d_model, d_ff, num_heads = config["model"]["d_model"], config["model"]["d_ff"], config["model"]["num_heads"]
+    activation, is_gate = config["model"]["activation"], config["model"]["is_gate"]
+    num_layers, cntx = config["model"]["num_layers"], config["model"]["context_length"]
     model_params = {
-        "d_model": config["model"]["d_model"],
-        "d_ff": config["model"]["d_ff"],
-        "num_heads": config["model"]["num_heads"],
-        "num_layers": config["model"]["num_layers"],
+        "d_model": d_model,
+        "d_ff": d_ff,
+        "num_heads": num_heads,
+        "activation": activation, 
+        "is_gate": is_gate,
+        "num_layers": num_layers,
         "theta": config["model"]["rope_theta"],
-        "context_length": config["model"]["context_length"],
+        "context_length": cntx,
         "vocab_size": config["model"]["vocab_size"],
         "norms": config["model"]["norms"],
         "device": device,
@@ -272,7 +264,7 @@ def parse_config(config, mode: str = "train"):
     if mode == "train":
         # run's and scheduler's variables
         assert "optim_step_batch_size" not in config["train"] or config["train"]["optim_step_batch_size"] % config["train"]["batch_size"] == 0, "'optim step batch size' should be divisible by 'batch size'"
-        bs, cntx = config["train"]["batch_size"], config["model"]["context_length"]
+        bs = config["train"]["batch_size"]
         os_bs = config["train"].get("optim_step_batch_size", config["train"]["batch_size"])
         steps = (config["train"]["total_tokens_processed"] + os_bs * cntx - 1) // (os_bs * cntx)
         lr_max, lr_min = float(config["optimizer"]["lr"]), float(config["optimizer"]["scheduler"]["lr_min"])
@@ -304,7 +296,9 @@ def parse_config(config, mode: str = "train"):
 
         # run parameters
         rope_str = "" if model_params["theta"] is not None else "_no_rope"
-        model_str = f"dmodel_{model_params['d_model']}_dff_{model_params['d_ff']}_numlayers_{model_params['num_layers']}_numheads_{model_params['num_heads']}_cntx_{cntx}{rope_str}"
+        activation_str = f"{'gated_' if is_gate else ''}{activation.lower()}"
+        dtype_str = config['model']['dtype']
+        model_str = f"dmodel_{d_model}_dff_{d_ff}_numlayers_{num_layers}_numheads_{num_heads}_cntx_{cntx}{rope_str}_{activation_str}_{dtype_str}"
         sched_name = config["optimizer"]["scheduler"]["name"]
         sched_str = f"{sched_name}/steps_{steps}/warmup_{warmup_iters}"
         optim_suffix = "_tr" if config["optimizer"]["is_trust_ratio"] else ""
@@ -364,3 +358,13 @@ def compute_grad_norm(model):
         p.grad.norm(2) for p in model.parameters() if p.grad is not None
     ])
     return torch.norm(norms).item()
+
+def print_d_model_d_ff(d_model: int, d_ff: int, is_gate: bool):
+    ratio = 8/3 if is_gate else 4
+    deviation = 100 * (max(d_ff / d_model, ratio) / min(d_ff / d_model, ratio) - 1)
+    dev_print = f"Deviaton is {deviation:.1f}%"
+    draft_print = f"Activation is {'' if is_gate else 'not '}gated - d_ff/d_model is expected ~{ratio:.2f}; {dev_print}. "
+    rec = 'good' if d_ff % 64 == 0 else 'not recommended'
+    div64_print = f"Hidden dim is {'' if d_ff % 64 == 0 else 'not '}divisible by 64. It is {rec} for GPU."
+    print(draft_print + div64_print)
+    
