@@ -11,6 +11,7 @@ from datetime import datetime
 from pathlib import Path
 from tqdm import tqdm
 from optimizers import Adam, Adan, Lion
+from termcolor import colored
 
 def softmax(x: torch.Tensor, dim: int, tau: float = 1.0) -> torch.Tensor:
     assert -x.dim() <= dim < x.dim(), "Dimension is wrong"
@@ -179,7 +180,7 @@ def eval(x: npt.NDArray, model, loss_fn, context_length: int, batch_size: int, n
             total_loss += loss.item() * curr_batch_size
             total_items += curr_batch_size
             avg_loss = total_loss / total_items
-            loop.set_postfix(valid_loss=avg_loss, total_items = total_items)
+            loop.set_postfix(valid_loss=f"{avg_loss:.3f}", total_items = total_items)
     model.train()
     return avg_loss
 
@@ -208,9 +209,11 @@ def parse_optim(config_opt):
         optimizer_params["nesterov"] = config_opt["nesterov"]
     return optimizer_params
 
-def clean(x, precision: int = 0):
+def clean(x, precision: int = 2):
     s = f"{round(float(x), 7):.{precision}e}".rstrip('0').rstrip('.')
     base, exp = s.split("e")
+    # strip tailing 0
+    base = base.rstrip('0').rstrip('.')
     # strip leading 0
     exp = exp.lstrip("+0") if not exp.startswith('-') else '-' + exp[1:].lstrip("0")
     return f"{base}e{exp}"
@@ -221,6 +224,7 @@ def parse_config(config, mode: str = "train"):
     dtype_map = {
         "float32": torch.float32,
         "float": torch.float32,
+        "amp": torch.float32,
         "float16": torch.float16,
         "half": torch.float16,
         "bfloat16": torch.bfloat16,
@@ -362,8 +366,8 @@ def compute_grad_norm(model):
 def print_d_model_d_ff(d_model: int, d_ff: int, is_gate: bool):
     ratio = 8/3 if is_gate else 4
     deviation = 100 * (max(d_ff / d_model, ratio) / min(d_ff / d_model, ratio) - 1)
-    dev_print = f"Deviaton is {deviation:.1f}%"
-    draft_print = f"Activation is {'' if is_gate else 'not '}gated - d_ff/d_model is expected ~{ratio:.2f}; {dev_print}. "
+    dev_print = colored(f"Deviaton is {deviation:.1f}%", "red" if deviation > 5 else  "green")
+    draft_print = colored("Activation ", "blue") + f"is {'' if is_gate else 'not '}gated - d_ff/d_model is expected ~{ratio:.2f}; {dev_print}. "
     rec = 'good' if d_ff % 64 == 0 else 'not recommended'
     div64_print = f"Hidden dim is {'' if d_ff % 64 == 0 else 'not '}divisible by 64. It is {rec} for GPU."
     print(draft_print + div64_print)

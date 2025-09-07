@@ -1,20 +1,19 @@
 seed: 123
 dataset_path:
   prefix: '~/ai_projects/data/TinyStoriesV2-GPT4'
-  # raw_data: 'raw_data'
   tokenized: 'tokenized'
 device: 0 # currently no distributed training
 model:
   vocab_size: 10_000
   context_length: 256
   d_model: 512 # 768 (dimensions used in many small Transformer papers)
-  d_ff: 2048 # 1344 # ~8/3 d_model; 64x, which is good for GPU performance.
+  d_ff: 1344 # 2048 #  ~8/3 d_model; 64x, which is good for GPU performance.
   activation: "SiLU"
-  is_gate: False
+  is_gate: True
   rope_theta: 10_000
   num_layers: 4
   num_heads: 16 # 17M non-embedding parameters
-  dtype: float32
+  dtype: 'float32' # 'amp' # 
   norms: # can be either 'RMSNorm', 'LayerNorm', None
     before: Null 
     after: 'RMSNorm'
@@ -31,13 +30,13 @@ optimizer:
   beta2: 0.999 # 0.92 # 
   beta3: 0.99
   epsilon: 1e-8
-  weight_decay: 0.0005
+  weight_decay: 5e-4
   nesterov: False
   is_trust_ratio: False
   scheduler:
     name: cosine
     lr_min: 0.0 # 3e-5 # 1e-6
-    warmup_iters: 0.01
+    warmup_iters: 0.03
     cosine_cycle_iters: 1.0
   clip_gradient:
     max_norm: 1.0
@@ -49,7 +48,7 @@ train:
   z_alpha: 0.0 # 1e-4
 validate:
   frequency: 0.1 # assumed that we don't have gradient accumulation
-  num_samples: 64_000 # '-1' means the full validation set
+  num_samples: 32_000 # '-1' means the full validation set
 serialize:
   path: "weights"
   frequency: 0.1 # assumed that we don't have gradient accumulation

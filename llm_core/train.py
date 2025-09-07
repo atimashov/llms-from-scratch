@@ -1,10 +1,12 @@
 import torch
 from torch.utils.tensorboard import SummaryWriter
+from torch.amp import autocast, GradScaler
 
 from tqdm import tqdm
 import yaml
 from argparse import ArgumentParser
 from pathlib import Path
+from termcolor import colored
 import os
 from time import perf_counter, sleep
 from datetime import datetime
@@ -32,6 +34,7 @@ def train_loop(model, optimizer, tokens, loss_fn, scheduler_params, max_norm, ru
     loader_mode = run_params["loader_mode"]
     lr = scheduler_params["lr_max"]
     num_tokens = tokens["train"].shape[0]
+    is_amp = config["model"]["dtype"] == "amp"
     
     # init indices
     if loader_mode == "sample":
@@ -39,7 +42,7 @@ def train_loop(model, optimizer, tokens, loss_fn, scheduler_params, max_norm, ru
     elif loader_mode == "in_memory_ids":
         t = perf_counter()
         im_ids = np.random.choice(num_tokens - context_length, size=min(steps * os_bs, num_tokens), replace=False)
-        print(f"⏱️ Created and shuffled in-memory ids: {im_ids.shape[0]:,} tokens. Time={perf_counter() - t:.2f}s") 
+        print(f"Created and shuffled in-memory ids: {im_ids.shape[0]:,} tokens. Time={perf_counter() - t:.2f}s") 
 
     # init logging and serialization
     writer = SummaryWriter(log_dir=f"runs/{run_name}")
@@ -51,8 +54,10 @@ def train_loop(model, optimizer, tokens, loss_fn, scheduler_params, max_norm, ru
     valid_loss, min_train_loss, min_valid_loss = float('nan'), float('inf'), float('inf')
 
     # start training
+    t_train = perf_counter()
+    scaler = GradScaler('cuda') if is_amp else None
     for step in loop:
-        t_start = perf_counter()
+        t_step = perf_counter()
         # update learning rate TODO: create one-line function
         scheduler_params["t"] = step + 1
         lr = cosine_lr_schedule(**scheduler_params)
@@ -65,10 +70,18 @@ def train_loop(model, optimizer, tokens, loss_fn, scheduler_params, max_norm, ru
         for i in range(accum_steps):
             start_seqs = get_start_seqs(step * os_bs + i * batch_size, batch_size, tokens["train"].shape[0] - context_length, im_ids, loader_mode)
             tokens_curr, tokens_next = data_loading(tokens["train"], context_length, start_seqs, device)
-            logits = model(tokens_curr)
-            loss = loss_fn(logits, tokens_next)
-            loss_acc +=  loss.item() / accum_steps
-            (loss / accum_steps).backward()
+            if is_amp:
+                with autocast('cuda'):
+                    logits = model(tokens_curr)
+                    loss = loss_fn(logits, tokens_next)
+                    loss_acc +=  loss.item() / accum_steps
+                    scaler.scale(loss / accum_steps).backward()
+            else:
+                logits = model(tokens_curr)
+                loss = loss_fn(logits, tokens_next)
+                loss_acc +=  loss.item() / accum_steps
+                (loss / accum_steps).backward()
+
         if loss_acc < min_train_loss:
             min_train_loss = loss_acc
         
@@ -99,12 +112,17 @@ def train_loop(model, optimizer, tokens, loss_fn, scheduler_params, max_norm, ru
         writer.add_scalar("train/grad_norm/pre_clip", g_norm_pre, step)
             
         
-        # TODO: DELETE after testing trust_ratio
-        param_to_name = {param: name for name, param in model.named_parameters()}
-        optimizer.step(None, param_to_name) # TODO: DELETE
+        if is_amp: # NOTE: it will not work with Lion_tr
+            scaler.step(optimizer)
+            scaler.update()
+        else:
+            # TODO: DELETE after testing trust_ratio
+            param_to_name = {param: name for name, param in model.named_parameters()}
+            optimizer.step(None, param_to_name) # TODO: DELETE
+
         # optimizer.step()
         # log 'tokens per second'
-        tokens_per_sec = os_bs * context_length / (perf_counter() - t_start)
+        tokens_per_sec = os_bs * context_length / (perf_counter() - t_step)
         writer.add_scalar("train/tokens_per_sec", tokens_per_sec, step)
 
         # update progress bar
@@ -120,16 +138,22 @@ def train_loop(model, optimizer, tokens, loss_fn, scheduler_params, max_norm, ru
         save_checkpoint(model, optimizer, -1, -1, -1, ckpt_path, config)
     n_iter, loss_step, _, _ = load_checkpoint(ckpt_path, model, None, device)
 
-    t = perf_counter()
+    t_eval = perf_counter()
     curr_time = datetime.now().time()
-    print(f"Validation started at {curr_time.strftime('%H:%M:%S')}: Number of samples={valid_total}")
-
-    final_valid_loss = eval(tokens["valid"], model, loss_fn, context_length, batch_size, valid_total, device)
-    final_perplexity = np.exp(final_valid_loss)
-    save_checkpoint(model, optimizer, n_iter, loss_step, final_valid_loss, ckpt_path, config)
+    print(colored(f"⏱️ Validation (train) started at {curr_time.strftime('%H:%M:%S')}: Number of samples={valid_total}", 'blue', attrs=["bold"]))
+    final_t_loss = eval(tokens["train"], model, loss_fn, context_length, batch_size, valid_total, device)
+    final_t_perp = np.exp(final_t_loss)
+    print(colored(f"⏱️ Validation (valid) started at {curr_time.strftime('%H:%M:%S')}: Number of samples={valid_total}", 'blue', attrs=["bold"]))
+    final_v_loss = eval(tokens["valid"], model, loss_fn, context_length, batch_size, valid_total, device)
+    final_v_perp = np.exp(final_v_loss)
+    save_checkpoint(model, optimizer, n_iter, loss_step, final_v_loss, ckpt_path, config)
+    # prepare writer
     writer.add_text(
         "summary/final_valid_metrics",
-        f"Full valid loss: {final_valid_loss:.4f}, Full valid perplexity: {final_perplexity:.2f}, Number of samples: {valid_total:,}, Time={perf_counter() - t:.2f}s",
+        f"Train loss={final_t_loss:.4f} | Valid loss={final_v_loss:.4f} | "
+        f"Train perplexity={final_t_perp:.4f} | Valid perplexity={final_v_perp:.4f} | "
+        f"Number of samples: {valid_total:,} | "
+        f"Train time: {perf_counter() - t_train:.2f}s | Eval time: {perf_counter() - t_eval:.2f}s",
         step+1
     )
     
@@ -144,23 +168,25 @@ def main(config):
     # print intro
     curr_time = datetime.now().time()
     print()
+    print(colored("-" * 200, "cyan", attrs=["bold"]))
     optim_suffix = "_tr" if config["optimizer"]["name"] in {"Lion"} and config["optimizer"]["is_trust_ratio"] else ""
     optim_name = config["optimizer"]["name"] + optim_suffix
     dataset_name = Path(config["dataset_path"]["prefix"]).name
-    print(f"Run started at {curr_time.strftime("%H:%M:%S")}.")
+    print(colored(f"⏱️ Experiment started at {curr_time.strftime("%H:%M:%S")}.", 'blue', attrs=["bold"]))
     print(
-        f"Dataset: {dataset_name} | bs={run_params['batch_size']} | "
-        f"optim_step_bs={run_params['optimizer_step_batch_size']} | "
-        f"context={run_params['context_length']} | "
-        f"optim={optim_name} | "
-        f"warmup={scheduler_params['warmup_iters']} | "
-        f"lr_max={clean(scheduler_params['lr_max'])} | "
-        f"lr_min={clean(scheduler_params['lr_min'])} | "
-        f"w_decay={clean(optimizer_params['weight_decay'])} | "
-        f"z_alpha={run_params['z_alpha']} | "        
-        f"device={get_short_gpu_name(config["device"])} | "
-        f"steps={run_params['steps']} | "
-        f"activation: {'Gated ' if model_params['is_gate'] else ''}{model_params['activation']} | "    
+        f"{colored('Dataset: ', 'blue', attrs=["bold"])}{dataset_name} | bs={run_params['batch_size']} | "
+        f"{colored('optim_step_bs=', 'blue')}{run_params['optimizer_step_batch_size']} | "
+        f"{colored('context=', 'blue')}{run_params['context_length']} | "
+        f"{colored('optim=', 'blue')}{optim_name} | "
+        f"{colored('warmup=', 'blue')}{scheduler_params['warmup_iters']} | "
+        f"{colored('lr_max=', 'blue')}{clean(scheduler_params['lr_max'])} | "
+        f"{colored('lr_min=', 'blue')}{clean(scheduler_params['lr_min'])} | "
+        f"{colored('w_decay=', 'blue')}{clean(optimizer_params['weight_decay'])} | "
+        f"{colored('z_alpha=', 'blue')}{run_params['z_alpha']} | "        
+        f"{colored('device=', 'blue') }{get_short_gpu_name(config["device"])} | "
+        f"{colored('steps=', 'blue')}{run_params['steps']} | "
+        f"{colored('activation=', 'blue')}{'Gated ' if model_params['is_gate'] else ''}{model_params['activation']} | "
+        f"{colored('dtype=', 'blue')}{config['model']['dtype']} | "   
     )
     print_d_model_d_ff(model_params["d_model"], model_params["d_ff"], model_params['is_gate'])
 
@@ -176,10 +202,10 @@ def main(config):
         "valid": np.load(tokens_params["valid"], mmap_mode='r')
     }
     print(
-        f"Model parameters: {count_parameters(model):,} | "
+        colored("Model parameters: ", 'blue') + f"{count_parameters(model):,} | "
         f"d_model={model_params["d_model"]:,} | "
         f"d_ff={model_params["d_ff"]:,} |")
-    print(f"Loader size: train={tokens['train'].shape[0]:,} | validate={tokens['valid'].shape[0]:,}")
+    print(colored("Loader size: ", 'blue') + f"train={tokens['train'].shape[0]:,} | validate={tokens['valid'].shape[0]:,}")
     
     # create loss
     def loss_fn(logits: torch.Tensor, target: torch.Tensor, z_alpha:float = run_params["z_alpha"]):
@@ -187,12 +213,15 @@ def main(config):
     
     # run training loop
     train_loop(model, optimizer, tokens, loss_fn, scheduler_params, max_norm, run_params, config)
-    print("-" * 100)
+    print(colored("-" * 200, "cyan", attrs=["bold"]))
 
 if __name__ == '__main__':
     seed = 123
     torch.manual_seed(seed)
 
+    curr_time = datetime.now().time()
+    print(colored(f"⏱️ Run started at {curr_time.strftime("%H:%M:%S")}.", 'red', attrs=["bold"]))
+    print(colored("-" * 200, 'red', attrs=["bold"]))
     # read config
     parser = ArgumentParser()
     parser.add_argument('--config', type=str, default='config.yaml', help='config file')
@@ -200,7 +229,12 @@ if __name__ == '__main__':
 
     with open(inputs.config, 'r') as stream:
         config = yaml.safe_load(stream)
-    config["device"] = 1
-    config["model"]["activation"] = "SqReLU"
-    main(config)
-    
+    config["device"] = 0
+    config["train"]["z_alpha"] = 0.0
+    # TODO: modify warmup to 5%
+    for lr in [5e-4, 3e-4, 1e-4, 1.1e-3, 9e-5, 7e-4]: #,  
+        config["optimizer"]["lr"] = lr
+        # config["train"]["total_tokens_processed"] = int(config["train"]["total_tokens_processed"] * 1.5)
+        # config["model"]["d_ff"] = 1344 if is_gate else 2048
+        config["optimizer"]["scheduler"]["lr_min"] = lr / 10
+        main(config)
