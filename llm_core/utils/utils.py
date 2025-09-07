@@ -184,6 +184,48 @@ def eval(x: npt.NDArray, model, loss_fn, context_length: int, batch_size: int, n
     model.train()
     return avg_loss
 
+def log_evals(ckpt_path: str, step: int, t_train, tokens, model, optimizer, loss_fn, config, writer):
+    t_eval = perf_counter()
+
+    # unpack variables
+    valid_total = config["validate"]["num_samples"] if config["validate"]["num_samples"] >= 0 else tokens["valid"].shape[0]
+    context_length = config["model"]["context_length"]
+    batch_size = config["train"]["batch_size"]
+    if config["device"] == "cpu":
+        device = torch.device(config["device"])
+    elif isinstance(config["device"], int):
+        device = torch.device(f"cuda:{config["device"]}")
+    
+    # load model to evaluate
+    if not ckpt_path.exists():
+        save_checkpoint(model, optimizer, -1, -1, -1, ckpt_path, config)
+    n_iter, loss_step, _, _ = load_checkpoint(ckpt_path, model, None, device)
+
+    # calculate evals
+    curr_time = datetime.now().time()
+    print(colored(f"⏱️ Validation (train) started at {curr_time.strftime('%H:%M:%S')}: Number of samples={valid_total}", 'blue', attrs=["bold"]))
+    final_t_loss = eval(tokens["train"], model, loss_fn, context_length, batch_size, valid_total, device)
+    final_t_perp = np.exp(final_t_loss)
+
+    curr_time = datetime.now().time()
+    print(colored(f"⏱️ Validation (valid) started at {curr_time.strftime('%H:%M:%S')}: Number of samples={valid_total}", 'blue', attrs=["bold"]))
+    final_v_loss = eval(tokens["valid"], model, loss_fn, context_length, batch_size, valid_total, device)
+    final_v_perp = np.exp(final_v_loss)
+
+    # save checkpoint with losses
+    save_checkpoint(model, optimizer, n_iter, loss_step, final_v_loss, ckpt_path, config)
+    
+    # add results to my writer
+    writer.add_text(
+        "summary/final_valid_metrics",
+        f"Train loss = {final_t_loss:.4f} | Valid loss = {final_v_loss:.4f} | "
+        f"Train perplexity = {final_t_perp:.4f} | Valid perplexity = {final_v_perp:.4f} | "
+        f"Num of samples = {valid_total:,} | "
+        f"Train time = {perf_counter() - t_train:.2f}s | Eval time = {perf_counter() - t_eval:.2f}s",
+        step+1
+    )
+
+
 def get_short_gpu_name(gpu_id=0):
     name = torch.cuda.get_device_name(gpu_id)
     for repl in ["NVIDIA", "Generation", "GeForce"]:

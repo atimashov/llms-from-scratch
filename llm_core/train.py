@@ -125,6 +125,10 @@ def train_loop(model, optimizer, tokens, loss_fn, scheduler_params, max_norm, ru
         tokens_per_sec = os_bs * context_length / (perf_counter() - t_step)
         writer.add_scalar("train/tokens_per_sec", tokens_per_sec, step)
 
+        # run eval of large subset of train and valid datasets if asked
+        if step + 1 in config["validate"]["eval_steps"]:
+            log_evals(ckpt_path, step, t_train, tokens, model, optimizer, loss_fn, config, writer)
+
         # update progress bar
         loop.set_postfix(
             lr=f"{lr:.2e}", 
@@ -133,29 +137,9 @@ def train_loop(model, optimizer, tokens, loss_fn, scheduler_params, max_norm, ru
             valid_loss=f"{valid_loss:.3f}",
             min_valid_loss=f"{min_valid_loss:.3f}"
         )
-    # run the best model on the full valid set
-    if not ckpt_path.exists():
-        save_checkpoint(model, optimizer, -1, -1, -1, ckpt_path, config)
-    n_iter, loss_step, _, _ = load_checkpoint(ckpt_path, model, None, device)
-
-    t_eval = perf_counter()
-    curr_time = datetime.now().time()
-    print(colored(f"⏱️ Validation (train) started at {curr_time.strftime('%H:%M:%S')}: Number of samples={valid_total}", 'blue', attrs=["bold"]))
-    final_t_loss = eval(tokens["train"], model, loss_fn, context_length, batch_size, valid_total, device)
-    final_t_perp = np.exp(final_t_loss)
-    print(colored(f"⏱️ Validation (valid) started at {curr_time.strftime('%H:%M:%S')}: Number of samples={valid_total}", 'blue', attrs=["bold"]))
-    final_v_loss = eval(tokens["valid"], model, loss_fn, context_length, batch_size, valid_total, device)
-    final_v_perp = np.exp(final_v_loss)
-    save_checkpoint(model, optimizer, n_iter, loss_step, final_v_loss, ckpt_path, config)
-    # prepare writer
-    writer.add_text(
-        "summary/final_valid_metrics",
-        f"Train loss={final_t_loss:.4f} | Valid loss={final_v_loss:.4f} | "
-        f"Train perplexity={final_t_perp:.4f} | Valid perplexity={final_v_perp:.4f} | "
-        f"Number of samples: {valid_total:,} | "
-        f"Train time: {perf_counter() - t_train:.2f}s | Eval time: {perf_counter() - t_eval:.2f}s",
-        step+1
-    )
+    # run the best model on the large subsets of train and valid set
+    if step + 1 not in config["validate"]["eval_steps"]:
+        log_evals(ckpt_path, step, t_train, tokens, model, optimizer, loss_fn, config, writer)
     
     # close writer
     writer.close()
@@ -229,10 +213,12 @@ if __name__ == '__main__':
 
     with open(inputs.config, 'r') as stream:
         config = yaml.safe_load(stream)
-    config["device"] = 0
+
+    config["device"] = 1
     config["train"]["z_alpha"] = 0.0
-    # TODO: modify warmup to 5%
-    for lr in [5e-4, 3e-4, 1e-4, 1.1e-3, 9e-5, 7e-4]: #,  
+
+    # # TODO: modify warmup to 5%
+    for lr in [7e-5, 5e-5]: #,  
         config["optimizer"]["lr"] = lr
         # config["train"]["total_tokens_processed"] = int(config["train"]["total_tokens_processed"] * 1.5)
         # config["model"]["d_ff"] = 1344 if is_gate else 2048
