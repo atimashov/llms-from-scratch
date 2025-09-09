@@ -26,8 +26,10 @@ def train_loop(model, optimizer, tokens, loss_fn, scheduler_params, max_norm, ru
     context_length = run_params["context_length"]
     valid_every = max(1, int(1 / run_params["valid_freq"] * batch_size / os_bs)) # TODO: probably, it makes sense to divide by 'os_bs / batch_size'
     valid_total = run_params["valid_total"] if run_params["valid_total"] >= 0 else tokens["valid"].shape[0]
+    heavy_valid_total = config["serialize"]["num_samples"]
     serialize_path = run_params["serialize_path"]
-    serialize_first = run_params["serialize_first"]
+    serialize_min_steps = config["serialize"]["steps"]
+    near_end_threshold = config["serialize"]["near_end_threshold"]
     serialize_every = max(1, int(1 / run_params["serialize_freq"] * batch_size / os_bs))  
     run_name = run_params["run_name"]
     device = run_params["device"]
@@ -50,12 +52,13 @@ def train_loop(model, optimizer, tokens, loss_fn, scheduler_params, max_norm, ru
     ckpt_path.parent.mkdir(parents=True, exist_ok=True)
     
     model.train()
-    loop = tqdm(range(steps), leave = True)
+    loop = tqdm(range(steps), leave = True, desc = colored("Training", 'blue', attrs=["bold"]))
     valid_loss, min_train_loss, min_valid_loss = float('nan'), float('inf'), float('inf')
 
     # start training
     t_train = perf_counter()
     scaler = GradScaler('cuda') if is_amp else None
+    heavy_val_step, heavy_vals_num = -1, 0
     for step in loop:
         t_step = perf_counter()
         # update learning rate TODO: create one-line function
@@ -84,7 +87,17 @@ def train_loop(model, optimizer, tokens, loss_fn, scheduler_params, max_norm, ru
 
         if loss_acc < min_train_loss:
             min_train_loss = loss_acc
-        
+            # Reduce interval between heavy evaluations near the end
+            if steps - (step + 1) <= near_end_threshold:
+                serialize_min_steps = config["serialize"]["min_steps"]
+            # Check if we should run heavy eval
+            if step - heavy_val_step >= serialize_min_steps:
+                heavy_val_loss = eval(step, tokens["valid"], model, loss_fn, context_length, batch_size, heavy_valid_total, device, False, use_amp = is_amp)
+                heavy_vals_num += 1
+                if  heavy_val_loss < min_valid_loss:
+                    min_valid_loss = heavy_val_loss
+                    save_checkpoint(model, optimizer, step, min_valid_loss, -1, ckpt_path, config)
+                    heavy_val_step = step
 
         # log train params to tensorboard
         writer.add_scalar("train/lr", optimizer.param_groups[0]['lr'], step)
@@ -94,17 +107,13 @@ def train_loop(model, optimizer, tokens, loss_fn, scheduler_params, max_norm, ru
         # log validate params and log in tensorboard
         if step % valid_every == 0:
             valid_loss = eval_batch(tokens["valid"], model, loss_fn, context_length, batch_size, device)
-            if valid_loss < min_valid_loss:
-                min_valid_loss = valid_loss
-                if step / steps > serialize_first and step % serialize_every == 0:
-                    save_checkpoint(model, optimizer, step, min_valid_loss, -1, ckpt_path, config)
-
-            # add validate scalars to Tensorboard
             writer.add_scalar("valid/loss", valid_loss, step)
             writer.add_scalar("valid/perplexity", float('inf') if valid_loss > 20 else np.exp(valid_loss), step)
 
-        # clip gradients TODO: add to parser
+        # clip gradients
         if max_norm is not None:
+            if is_amp:
+                scaler.unscale_(optimizer)
             g_norm_pre, g_norm_post = gradient_clipping(model, max_l2_norm= max_norm)
             writer.add_scalar("train/grad_norm/post_clip", g_norm_post, step)
         else:
@@ -126,8 +135,8 @@ def train_loop(model, optimizer, tokens, loss_fn, scheduler_params, max_norm, ru
         writer.add_scalar("train/tokens_per_sec", tokens_per_sec, step)
 
         # run eval of large subset of train and valid datasets if asked
-        if step + 1 in config["validate"]["eval_steps"]:
-            log_evals(ckpt_path, step, t_train, tokens, model, optimizer, loss_fn, config, writer)
+        if step + 1 in config["validate"]["eval_steps"] and step + 1 != steps:
+            log_evals(ckpt_path, step, t_train, tokens, model, optimizer, loss_fn, config, writer, use_amp = is_amp)
 
         # update progress bar
         loop.set_postfix(
@@ -135,11 +144,11 @@ def train_loop(model, optimizer, tokens, loss_fn, scheduler_params, max_norm, ru
             train_loss=f"{loss_acc:.3f}", 
             min_train_loss=f"{min_train_loss:.3f}",
             valid_loss=f"{valid_loss:.3f}",
-            min_valid_loss=f"{min_valid_loss:.3f}"
+            min_valid_loss=f"{min_valid_loss:.3f}",
+            heavy_vals = f"{heavy_vals_num}"
         )
     # run the best model on the large subsets of train and valid set
-    if step + 1 not in config["validate"]["eval_steps"]:
-        log_evals(ckpt_path, step, t_train, tokens, model, optimizer, loss_fn, config, writer)
+    log_evals(ckpt_path, step, t_train, tokens, model, optimizer, loss_fn, config, writer, use_amp = is_amp)
     
     # close writer
     writer.close()
@@ -157,18 +166,19 @@ def main(config):
     optim_name = config["optimizer"]["name"] + optim_suffix
     dataset_name = Path(config["dataset_path"]["prefix"]).name
     print(colored(f"⏱️ Experiment started at {curr_time.strftime("%H:%M:%S")}.", 'blue', attrs=["bold"]))
+    warmup_perc = 100 * scheduler_params['warmup_iters'] / run_params['steps']
     print(
-        f"{colored('Dataset: ', 'blue', attrs=["bold"])}{dataset_name} | bs={run_params['batch_size']} | "
-        f"{colored('optim_step_bs=', 'blue')}{run_params['optimizer_step_batch_size']} | "
+        f"{colored('Dataset: ', 'blue', attrs=["bold"])}{dataset_name} | bs={run_params['batch_size']:,} | "
+        f"{colored('optim_step_bs=', 'blue')}{run_params['optimizer_step_batch_size']:,} | "
         f"{colored('context=', 'blue')}{run_params['context_length']} | "
         f"{colored('optim=', 'blue')}{optim_name} | "
-        f"{colored('warmup=', 'blue')}{scheduler_params['warmup_iters']} | "
+        f"{colored('steps=', 'blue')}{run_params['steps']:,} | "
+        f"{colored('warmup=', 'blue')}{scheduler_params['warmup_iters']:,} ({warmup_perc:.2f}% of total) | "
         f"{colored('lr_max=', 'blue')}{clean(scheduler_params['lr_max'])} | "
         f"{colored('lr_min=', 'blue')}{clean(scheduler_params['lr_min'])} | "
         f"{colored('w_decay=', 'blue')}{clean(optimizer_params['weight_decay'])} | "
-        f"{colored('z_alpha=', 'blue')}{run_params['z_alpha']} | "        
+        f"{colored('z_alpha=', 'blue')}{clean(run_params['z_alpha'])} | "        
         f"{colored('device=', 'blue') }{get_short_gpu_name(config["device"])} | "
-        f"{colored('steps=', 'blue')}{run_params['steps']} | "
         f"{colored('activation=', 'blue')}{'Gated ' if model_params['is_gate'] else ''}{model_params['activation']} | "
         f"{colored('dtype=', 'blue')}{config['model']['dtype']} | "   
     )
@@ -187,6 +197,8 @@ def main(config):
     }
     print(
         colored("Model parameters: ", 'blue') + f"{count_parameters(model):,} | "
+        f"num_layers={model_params["num_layers"]:,} | "
+        f"num_heads={model_params["num_heads"]:,} | "
         f"d_model={model_params["d_model"]:,} | "
         f"d_ff={model_params["d_ff"]:,} |")
     print(colored("Loader size: ", 'blue') + f"train={tokens['train'].shape[0]:,} | validate={tokens['valid'].shape[0]:,}")
@@ -214,13 +226,12 @@ if __name__ == '__main__':
     with open(inputs.config, 'r') as stream:
         config = yaml.safe_load(stream)
 
-    config["device"] = 1
-    config["train"]["z_alpha"] = 0.0
+    config["device"] = 0
+    config["validate"]["eval_steps"] = {5_000, 10_000}
+    config["model"]["is_gate"] = True
+    config["model"]["d_ff"] = 2016 if config["model"]["is_gate"] else 3072
 
-    # # TODO: modify warmup to 5%
-    for lr in [7e-5, 5e-5]: #,  
+    for lr in [1e-4]: # [1e-4, 7e-5]: # 
         config["optimizer"]["lr"] = lr
-        # config["train"]["total_tokens_processed"] = int(config["train"]["total_tokens_processed"] * 1.5)
-        # config["model"]["d_ff"] = 1344 if is_gate else 2048
         config["optimizer"]["scheduler"]["lr_min"] = lr / 10
         main(config)

@@ -12,6 +12,8 @@ from pathlib import Path
 from tqdm import tqdm
 from optimizers import Adam, Adan, Lion
 from termcolor import colored
+from contextlib import nullcontext
+from torch.amp import autocast
 
 def softmax(x: torch.Tensor, dim: int, tau: float = 1.0) -> torch.Tensor:
     assert -x.dim() <= dim < x.dim(), "Dimension is wrong"
@@ -157,7 +159,7 @@ def eval_batch(x: npt.NDArray, model, loss_fn, context_length: int, batch_size: 
     return loss
 
 
-def eval(x: npt.NDArray, model, loss_fn, context_length: int, batch_size: int, num_samples: int | None, device):
+def eval(step: int, x: npt.NDArray, model, loss_fn, context_length: int, batch_size: int, num_samples: int | None, device, tqdm_logs: bool = True, train_data = False, use_amp: bool = False):
     max_available = x.shape[0] - context_length
     num_samples = max_available if num_samples == -1 else min(num_samples, max_available)
     assert num_samples > 0, "Not enough tokens for evaluation"
@@ -165,11 +167,19 @@ def eval(x: npt.NDArray, model, loss_fn, context_length: int, batch_size: int, n
     model.eval()
     total_loss, total_items = 0, 0
     
-    # create indices
+    # create indices (just first 'num_samples')
     im_ids = np.arange(num_samples, dtype = np.int32)
-    random.shuffle(im_ids)
     
-    with torch.no_grad(), tqdm(range(0, num_samples, batch_size), leave = True) as loop:    
+    loop_range = range(0, num_samples, batch_size)
+    if tqdm_logs:
+        curr_time = datetime.now().time()
+        desc = colored(f" Validation ({'train' if train_data else 'valid'}) at step {step + 1:,} started at {curr_time.strftime('%H:%M:%S')}", 'blue')
+        loop_context = tqdm(loop_range, leave=True, desc=desc)
+    else: 
+        loop_context = nullcontext(loop_range)
+
+    amp_ctx = autocast(device_type = "cuda") if use_amp else nullcontext()
+    with torch.no_grad(), amp_ctx, loop_context as loop:    
         for start_from in loop:
             curr_batch_size = min(batch_size, num_samples - start_from)
             start_seqs = get_start_seqs(start_from, curr_batch_size, None, im_ids, "in_memory_ids")
@@ -180,11 +190,13 @@ def eval(x: npt.NDArray, model, loss_fn, context_length: int, batch_size: int, n
             total_loss += loss.item() * curr_batch_size
             total_items += curr_batch_size
             avg_loss = total_loss / total_items
-            loop.set_postfix(valid_loss=f"{avg_loss:.3f}", total_items = total_items)
+            if tqdm_logs:
+                label = colored("train_loss", "blue") if train_data else colored("valid_loss", "green")
+                loop.set_postfix(**{label: f"{avg_loss:.3f}", "total_items": total_items})
     model.train()
     return avg_loss
 
-def log_evals(ckpt_path: str, step: int, t_train, tokens, model, optimizer, loss_fn, config, writer):
+def log_evals(ckpt_path: str, step: int, t_train, tokens, model, optimizer, loss_fn, config, writer, use_amp):
     t_eval = perf_counter()
 
     # unpack variables
@@ -202,14 +214,9 @@ def log_evals(ckpt_path: str, step: int, t_train, tokens, model, optimizer, loss
     n_iter, loss_step, _, _ = load_checkpoint(ckpt_path, model, None, device)
 
     # calculate evals
-    curr_time = datetime.now().time()
-    print(colored(f"⏱️ Validation (train) started at {curr_time.strftime('%H:%M:%S')}: Number of samples={valid_total}", 'blue', attrs=["bold"]))
-    final_t_loss = eval(tokens["train"], model, loss_fn, context_length, batch_size, valid_total, device)
+    final_t_loss = eval(step, tokens["train"], model, loss_fn, context_length, batch_size, valid_total, device, train_data = True, use_amp = use_amp)
     final_t_perp = np.exp(final_t_loss)
-
-    curr_time = datetime.now().time()
-    print(colored(f"⏱️ Validation (valid) started at {curr_time.strftime('%H:%M:%S')}: Number of samples={valid_total}", 'blue', attrs=["bold"]))
-    final_v_loss = eval(tokens["valid"], model, loss_fn, context_length, batch_size, valid_total, device)
+    final_v_loss = eval(step, tokens["valid"], model, loss_fn, context_length, batch_size, valid_total, device, use_amp = use_amp)
     final_v_perp = np.exp(final_v_loss)
 
     # save checkpoint with losses
@@ -314,7 +321,7 @@ def parse_config(config, mode: str = "train"):
         os_bs = config["train"].get("optim_step_batch_size", config["train"]["batch_size"])
         steps = (config["train"]["total_tokens_processed"] + os_bs * cntx - 1) // (os_bs * cntx)
         lr_max, lr_min = float(config["optimizer"]["lr"]), float(config["optimizer"]["scheduler"]["lr_min"])
-        warmup_iters = int(config["optimizer"]["scheduler"]["warmup_iters"] * steps)
+        warmup_iters = config["optimizer"]["scheduler"]["warmup_iters"]
         cosine_cycle_iters= int(config["optimizer"]["scheduler"]["cosine_cycle_iters"] * steps)
 
         # optimizer parameters
@@ -367,7 +374,7 @@ def parse_config(config, mode: str = "train"):
             "valid_freq": config["validate"]["frequency"],
             "valid_total": config["validate"]["num_samples"],        
             "serialize_path": config["serialize"]["path"],
-            "serialize_first": config["serialize"]["first_save"],
+            # "serialize_first": config["serialize"]["first_save"],
             "serialize_freq":serialize_freq,
             "run_name": run_name,
             "device": device,

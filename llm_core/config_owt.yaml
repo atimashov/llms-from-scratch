@@ -6,15 +6,15 @@ dataset_path:
 device: 0 # currently no distributed training
 model:
   vocab_size: 32_000
-  context_length: 384 # 256
-  d_model: 512 # 768 (dimensions used in many small Transformer papers)
-  d_ff: 1344 # ~8/3 d_model; 64x, which is good for GPU performance.
+  context_length: 256 # 512
+  d_model: 768 # (dimensions used in many small Transformer papers)
+  d_ff: 2016 # 3072 #  ~8/3 d_model; 64x, which is good for GPU performance.
   activation: "SiLU"
   is_gate: True
   rope_theta: 10_000
   num_layers: 4
   num_heads: 16 # 17M non-embedding parameters
-  dtype: float32
+  dtype: 'amp' # 'float32' # 
   norms: # can be either 'RMSNorm', 'LayerNorm', None
     before: Null 
     after: 'RMSNorm'
@@ -25,32 +25,36 @@ model:
   # load_name: "exp_bs_64_step_bs_64/loss_init/cosine/steps_40000/warmup_2000/Lion_tr/lrmax3e-3_lrmin3e-4_wdecay5e-4/dmodel_512_dff_1344_numlayers_4_numheads_16_cntx_256/20250830_203128/ckpt_best.pt"
 optimizer:
   name:  'Lion' # 'AdamW' # 'Lion' #
-  lr: 3e-4 # 5e-3 # 1e-3 # 2e-5 - 5e-5
+  lr: 7e-5
   beta: 0.9
   beta1: 0.9 # 0.98 # 
   beta2: 0.999 # 0.92 # 
   beta3: 0.99
   epsilon: 1e-8
-  weight_decay: 0.0005
+  weight_decay: 5e-5
   nesterov: False
   is_trust_ratio: False
   scheduler:
     name: cosine
-    lr_min: 0.0 # 3e-5 # 1e-6
-    warmup_iters: 0.05
+    lr_min: 7e-6
+    warmup_iters: 1200 # 0.03
     cosine_cycle_iters: 1.0
   clip_gradient:
     max_norm: 1.0
 train:
-  total_tokens_processed:  655_360_000 #983_040_000 # 327_680_000 #  batch_size x step_count x context_length
+  total_tokens_processed:  327_680_000 # 655_360_000 #983_040_000  batch_size x step_count x context_length
   batch_size: 64
   optim_step_batch_size: 64 # 2560 # 1280
   loader_mode: 'in_memory_ids' # 'sample' # ,
-  z_alpha: 0.0 # 1e-4
+  z_alpha: 1e-4
 validate:
   frequency: 0.1 # assumed that we don't have gradient accumulation
-  num_samples: 64_000 # '-1' means the full validation set
-serialize:
+  eval_steps: {20_000}
+  num_samples: 32_000 # '-1' means the full validation set
+serialize: # and heavy_eval
   path: "weights"
+  steps: 1000
+  min_steps: 50
+  near_end_threshold: 5000
+  num_samples: 1280
   frequency: 0.1 # assumed that we don't have gradient accumulation
-  first_save: 0.3
