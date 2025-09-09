@@ -7,8 +7,8 @@ device: 0 # currently no distributed training
 model:
   vocab_size: 32_000
   context_length: 256 # 512
-  d_model: 768 # (dimensions used in many small Transformer papers)
-  d_ff: 2016 # 3072 #  ~8/3 d_model; 64x, which is good for GPU performance.
+  d_model: 512 # 1536 # 768 # (dimensions used in many small Transformer papers)
+  d_ff: 4032 # 2016 # 6144 3072 #  ~8/3 d_model; 64x, which is good for GPU performance.
   activation: "SiLU"
   is_gate: True
   rope_theta: 10_000
@@ -47,6 +47,7 @@ train:
   optim_step_batch_size: 64 # 2560 # 1280
   loader_mode: 'in_memory_ids' # 'sample' # ,
   z_alpha: 1e-4
+  compile: True
 validate:
   frequency: 0.1 # assumed that we don't have gradient accumulation
   eval_steps: {20_000}

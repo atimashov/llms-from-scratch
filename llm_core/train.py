@@ -17,6 +17,7 @@ from utils import *
 
 seed = 123
 torch.manual_seed(seed)
+torch.set_float32_matmul_precision('high')
 
 def train_loop(model, optimizer, tokens, loss_fn, scheduler_params, max_norm, run_params, config = None):
     # unpack params
@@ -44,7 +45,7 @@ def train_loop(model, optimizer, tokens, loss_fn, scheduler_params, max_norm, ru
     elif loader_mode == "in_memory_ids":
         t = perf_counter()
         im_ids = np.random.choice(num_tokens - context_length, size=min(steps * os_bs, num_tokens), replace=False)
-        print(f"Created and shuffled in-memory ids: {im_ids.shape[0]:,} tokens. Time={perf_counter() - t:.2f}s") 
+        print(f"Sampled to keep in-memory ids: {im_ids.shape[0]:,} tokens. Time={perf_counter() - t:.2f}s") 
 
     # init logging and serialization
     writer = SummaryWriter(log_dir=f"runs/{run_name}")
@@ -180,7 +181,8 @@ def main(config):
         f"{colored('z_alpha=', 'blue')}{clean(run_params['z_alpha'])} | "        
         f"{colored('device=', 'blue') }{get_short_gpu_name(config["device"])} | "
         f"{colored('activation=', 'blue')}{'Gated ' if model_params['is_gate'] else ''}{model_params['activation']} | "
-        f"{colored('dtype=', 'blue')}{config['model']['dtype']} | "   
+        f"{colored('dtype=', 'blue')}{config['model']['dtype']} | "
+        f"{colored('compile=', 'blue')}{config['train']['compile']} | " 
     )
     print_d_model_d_ff(model_params["d_model"], model_params["d_ff"], model_params['is_gate'])
 
@@ -197,22 +199,30 @@ def main(config):
     }
     print(
         colored("Model parameters: ", 'blue') + f"{count_parameters(model):,} | "
-        f"num_layers={model_params["num_layers"]:,} | "
-        f"num_heads={model_params["num_heads"]:,} | "
-        f"d_model={model_params["d_model"]:,} | "
-        f"d_ff={model_params["d_ff"]:,} |")
-    print(colored("Loader size: ", 'blue') + f"train={tokens['train'].shape[0]:,} | validate={tokens['valid'].shape[0]:,}")
+        f"{colored('num_layers=', 'blue')}{model_params["num_layers"]:,} | "
+        f"{colored('num_heads=', 'blue')}{model_params["num_heads"]:,} | "
+        f"{colored('d_model=', 'blue')}{model_params["d_model"]:,} | "
+        f"{colored('d_ff=', 'blue')}{model_params["d_ff"]:,} |"
+    )
+    print(
+        f"{colored("Loader size: ", 'blue')} "
+        f"{colored('train=', 'blue')}{tokens['train'].shape[0]:,} | "
+        f"{colored('validate=', 'blue')}{tokens['valid'].shape[0]:,} | "
+        f"{colored('Tokens to process=', 'blue')}{config['train']['total_tokens_processed']:,} | "
+    )
     
     # create loss
     def loss_fn(logits: torch.Tensor, target: torch.Tensor, z_alpha:float = run_params["z_alpha"]):
         return cross_entropy(logits, target, float(z_alpha))
     
     # run training loop
+    if config["train"]["compile"]:
+        model = torch.compile(model)
     train_loop(model, optimizer, tokens, loss_fn, scheduler_params, max_norm, run_params, config)
     print(colored("-" * 200, "cyan", attrs=["bold"]))
 
 if __name__ == '__main__':
-    seed = 123
+    seed = 124
     torch.manual_seed(seed)
 
     curr_time = datetime.now().time()
@@ -226,12 +236,27 @@ if __name__ == '__main__':
     with open(inputs.config, 'r') as stream:
         config = yaml.safe_load(stream)
 
-    config["device"] = 0
+    config["device"] = 1
     config["validate"]["eval_steps"] = {5_000, 10_000}
-    config["model"]["is_gate"] = True
-    config["model"]["d_ff"] = 2016 if config["model"]["is_gate"] else 3072
+    
+    # # NOTE: TEST!!!
+    config["model"]["activation"] = "GELU"
+    config["model"]["is_gate"] = False
+    config["optimizer"]["name"] = 'AdamW'
+    config["optimizer"]["lr"] = 3e-3
+    config["optimizer"]["beta2"] = 0.98
+    config["optimizer"]["weight_decay"] = 0.01
+    config["optimizer"]["scheduler"]["lr_min"] = 1e-3
+    config["train"]["optimizer_step_batch_size"] = 256
+    # # NOTE: TEST!!!
+    
+    # config["model"]["is_gate"] = True
+    # config["model"]["d_ff"] = 2016 if config["model"]["is_gate"] else 3072
+    config["model"]["d_ff"] = 4032 // 3 if config["model"]["is_gate"] else 6144 // 3
 
-    for lr in [1e-4]: # [1e-4, 7e-5]: # 
-        config["optimizer"]["lr"] = lr
-        config["optimizer"]["scheduler"]["lr_min"] = lr / 10
+    # lr = 1e-4
+    # config["optimizer"]["lr"] = lr
+    # config["optimizer"]["scheduler"]["lr_min"] = lr / 10
+    for num_heads in [16]: # 
+        config["model"]["num_heads"] = num_heads
         main(config)
