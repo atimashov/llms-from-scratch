@@ -7,19 +7,20 @@ device: 0 # currently no distributed training
 model:
   vocab_size: 32_000
   context_length: 256 # 512
-  d_model: 512 # 1536 # 768 # (dimensions used in many small Transformer papers)
-  d_ff: 4032 # 2016 # 6144 3072 #  ~8/3 d_model; 64x, which is good for GPU performance.
+  d_model: 768 # 512 # 1024 #  1536 # (dimensions used in many small Transformer papers)
+  d_ff:  2016 #1344 # 2688 # 6144 3072 #  ~8/3 d_model; 64x, which is good for GPU performance.
   activation: "SiLU"
   is_gate: True
   rope_theta: 10_000
-  num_layers: 4
-  num_heads: 16 # 17M non-embedding parameters
+  num_layers: 8 # 4
+  num_heads: 12 # 16 # 17M non-embedding parameters
   dtype: 'amp' # 'float32' # 
   norms: # can be either 'RMSNorm', 'LayerNorm', None
-    before: Null 
+    before: 'RMSNorm'
     after: 'RMSNorm'
     residual: Null
     final: 'RMSNorm'
+  weights_tying: False
   # load_prefix: "~/ai_projects/Natural_Language_Processing/p2_transformers/weights/TinyStoriesV2-GPT4/RTX5090"
   # load_name: "exp_bs_64_step_bs_64/loss_init/cosine/steps_40000/warmup_2000/Lion/lrmax5e-4_lrmin5e-5_wdecay5e-4/dmodel_512_dff_1344_numlayers_4_numheads_16_cntx_256/20250830_203010/ckpt_best.pt"
   # load_name: "exp_bs_64_step_bs_64/loss_init/cosine/steps_40000/warmup_2000/Lion_tr/lrmax3e-3_lrmin3e-4_wdecay5e-4/dmodel_512_dff_1344_numlayers_4_numheads_16_cntx_256/20250830_203128/ckpt_best.pt"
@@ -42,15 +43,15 @@ optimizer:
   clip_gradient:
     max_norm: 1.0
 train:
-  total_tokens_processed:  327_680_000 # 655_360_000 #983_040_000  batch_size x step_count x context_length
+  total_tokens_processed: 819_200_000 # 1_638_400_000 # 327_680_000 # 655_360_000 #  983_040_000  batch_size x step_count x context_length
   batch_size: 64
-  optim_step_batch_size: 64 # 2560 # 1280
+  optim_step_batch_size: 128 # 2560 # 1280
   loader_mode: 'in_memory_ids' # 'sample' # ,
   z_alpha: 1e-4
   compile: True
 validate:
   frequency: 0.1 # assumed that we don't have gradient accumulation
-  eval_steps: {20_000}
+  eval_steps: {0.25, 0.5, 0.75}
   num_samples: 32_000 # '-1' means the full validation set
 serialize: # and heavy_eval
   path: "weights"

@@ -310,6 +310,7 @@ def parse_config(config, mode: str = "train"):
         "context_length": cntx,
         "vocab_size": config["model"]["vocab_size"],
         "norms": config["model"]["norms"],
+        "weights_tying": config["model"]["weights_tying"],
         "device": device,
         "dtype": dtype_map[config["model"]["dtype"]]
     }
@@ -352,7 +353,8 @@ def parse_config(config, mode: str = "train"):
         activation_str = f"{'gated_' if is_gate else ''}{activation.lower()}"
         dtype_str = config['model']['dtype']
         compile_str = "_cmpl" if config["train"]["compile"] else ""
-        model_str = f"cntx_{cntx}_numlayers_{num_layers}_dmodel_{d_model}_dff_{d_ff}_numheads_{num_heads}{rope_str}_{activation_str}_{dtype_str}{compile_str}"
+        weights_tying_str = "_wt" if config["model"]["weights_tying"] else ""
+        model_str = f"cntx_{cntx}_numlayers_{num_layers}_dmodel_{d_model}_dff_{d_ff}_numheads_{num_heads}{rope_str}_{activation_str}_{dtype_str}{compile_str}{weights_tying_str}"
         sched_name = config["optimizer"]["scheduler"]["name"]
         sched_str = f"{sched_name}/steps_{steps}/warmup_{warmup_iters}"
         optim_suffix = "_tr" if config["optimizer"]["is_trust_ratio"] else ""

@@ -56,7 +56,7 @@ class TransformerLM(nn.Module):
     the position embedding matrix.
     num_layers: int The number of Transformer blocks to use.
     """
-    def __init__(self, d_model: int, d_ff: int, num_heads: int, activation: str, is_gate: bool, num_layers:int = 6, theta: float = 10000.0, context_length = 256, vocab_size: int = 10_000, norms: dict | None = None, device: torch.device | None = None, dtype: torch.dtype | None = None):
+    def __init__(self, d_model: int, d_ff: int, num_heads: int, activation: str, is_gate: bool, num_layers:int = 6, theta: float = 10000.0, context_length = 256, vocab_size: int = 10_000, norms: dict | None = None, weights_tying: bool = False, device: torch.device | None = None, dtype: torch.dtype | None = None):
         super().__init__()
         assert norms.get("final", None) in {"RMSNorm", "LayerNorm", None}
         self.context_length = context_length
@@ -71,12 +71,18 @@ class TransformerLM(nn.Module):
             self.ln_final = RMSNorm(d_model=d_model, device=device, dtype=dtype) if norms["final"] == "RMSNorm" else LayerNorm(d_model=d_model, device=device, dtype=dtype)
  
         self.lm_head = Linear(d_model, vocab_size, device=device,dtype=dtype)
+        self.wt = weights_tying
+        self.d_model = d_model
+        if self.wt:
+            self.lm_head.W = self.token_embeddings.emb
     
     def forward(self, token_ids, prob: bool = False, tau: float = 1.0):
         x = self.token_embeddings(token_ids)
         x = self.layers(x)
         x = self.ln_final(x)
         logits = self.lm_head(x)
+        if self.wt:
+            logits /= self.d_model ** 0.5
         if not prob:
             return logits
         probs = softmax(logits, dim= -1, tau = tau)

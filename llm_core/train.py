@@ -22,6 +22,7 @@ torch.set_float32_matmul_precision('high')
 def train_loop(model, optimizer, tokens, loss_fn, scheduler_params, max_norm, run_params, config = None):
     # unpack params
     steps = run_params["steps"]
+    eval_steps = {int(r * steps) for r in config["validate"]["eval_steps"]}
     batch_size = run_params["batch_size"]
     os_bs = run_params["optimizer_step_batch_size"]
     context_length = run_params["context_length"]
@@ -44,7 +45,8 @@ def train_loop(model, optimizer, tokens, loss_fn, scheduler_params, max_norm, ru
         im_ids = None
     elif loader_mode == "in_memory_ids":
         t = perf_counter()
-        im_ids = np.random.choice(num_tokens - context_length, size=min(steps * os_bs, num_tokens), replace=False)
+        size_to_sample = num_tokens - context_length
+        im_ids = np.random.choice(size_to_sample, size=min(steps * os_bs, size_to_sample), replace=False)
         print(f"Sampled to keep in-memory ids: {im_ids.shape[0]:,} tokens. Time={perf_counter() - t:.2f}s") 
 
     # init logging and serialization
@@ -70,6 +72,9 @@ def train_loop(model, optimizer, tokens, loss_fn, scheduler_params, max_norm, ru
            
         optimizer.zero_grad()
         loss_acc = 0
+        logits_norm_acc = 0.0
+        logits_max_acc = 0.0
+        logits_std_acc = 0.0
         accum_steps = os_bs // batch_size
         for i in range(accum_steps):
             start_seqs = get_start_seqs(step * os_bs + i * batch_size, batch_size, tokens["train"].shape[0] - context_length, im_ids, loader_mode)
@@ -85,6 +90,11 @@ def train_loop(model, optimizer, tokens, loss_fn, scheduler_params, max_norm, ru
                 loss = loss_fn(logits, tokens_next)
                 loss_acc +=  loss.item() / accum_steps
                 (loss / accum_steps).backward()
+            # Logit statistics (no grad)
+            with torch.no_grad():
+                logits_norm_acc += logits.norm(dim=-1).mean().item() / accum_steps
+                logits_max_acc  += logits.amax(dim=-1).mean().item() / accum_steps
+                logits_std_acc  += logits.std().item() / accum_steps
 
         if loss_acc < min_train_loss:
             min_train_loss = loss_acc
@@ -104,6 +114,9 @@ def train_loop(model, optimizer, tokens, loss_fn, scheduler_params, max_norm, ru
         writer.add_scalar("train/lr", optimizer.param_groups[0]['lr'], step)
         writer.add_scalar("train/loss", loss_acc, step)
         writer.add_scalar("train/perplexity", float('inf') if loss_acc > 20 else np.exp(loss_acc), step)
+        writer.add_scalar("train/logits_norm", logits_norm_acc, step)
+        writer.add_scalar("train/logits_max", logits_max_acc, step)
+        writer.add_scalar("train/logits_std", logits_std_acc, step)
 
         # log validate params and log in tensorboard
         if step % valid_every == 0:
@@ -136,7 +149,7 @@ def train_loop(model, optimizer, tokens, loss_fn, scheduler_params, max_norm, ru
         writer.add_scalar("train/tokens_per_sec", tokens_per_sec, step)
 
         # run eval of large subset of train and valid datasets if asked
-        if step + 1 in config["validate"]["eval_steps"] and step + 1 != steps:
+        if step + 1 in eval_steps and step + 1 != steps:
             log_evals(ckpt_path, step, t_train, tokens, model, optimizer, loss_fn, config, writer, use_amp = is_amp)
 
         # update progress bar
@@ -154,7 +167,10 @@ def train_loop(model, optimizer, tokens, loss_fn, scheduler_params, max_norm, ru
     # close writer
     writer.close()
 
-def main(config):
+def main(config, random_seed = 123):
+    # control source of randonmess
+    torch.manual_seed(seed)
+
     # parse parameters
     model_params, ckpt_path, optimizer_params, scheduler_params, clip_grad_params, tokens_params, run_params = parse_config(config)
     max_norm = clip_grad_params["max_norm"]
@@ -183,6 +199,7 @@ def main(config):
         f"{colored('activation=', 'blue')}{'Gated ' if model_params['is_gate'] else ''}{model_params['activation']} | "
         f"{colored('dtype=', 'blue')}{config['model']['dtype']} | "
         f"{colored('compile=', 'blue')}{config['train']['compile']} | " 
+        f"{colored('w_tying=', 'blue')}{config['model']['weights_tying']} | " 
     )
     print_d_model_d_ff(model_params["d_model"], model_params["d_ff"], model_params['is_gate'])
 
@@ -222,9 +239,6 @@ def main(config):
     print(colored("-" * 200, "cyan", attrs=["bold"]))
 
 if __name__ == '__main__':
-    seed = 124
-    torch.manual_seed(seed)
-
     curr_time = datetime.now().time()
     print(colored(f"⏱️ Run started at {curr_time.strftime("%H:%M:%S")}.", 'red', attrs=["bold"]))
     print(colored("-" * 200, 'red', attrs=["bold"]))
@@ -236,27 +250,25 @@ if __name__ == '__main__':
     with open(inputs.config, 'r') as stream:
         config = yaml.safe_load(stream)
 
-    config["device"] = 1
-    config["validate"]["eval_steps"] = {5_000, 10_000}
-    
+    config["device"] = 0
+    # config["model"]["activation"] = "SqReLU"
+    # config["model"]["is_gate"] = False
     # # NOTE: TEST!!!
-    config["model"]["activation"] = "GELU"
-    config["model"]["is_gate"] = False
-    config["optimizer"]["name"] = 'AdamW'
-    config["optimizer"]["lr"] = 3e-3
-    config["optimizer"]["beta2"] = 0.98
-    config["optimizer"]["weight_decay"] = 0.01
-    config["optimizer"]["scheduler"]["lr_min"] = 1e-3
-    config["train"]["optimizer_step_batch_size"] = 256
+    # config["optimizer"]["name"] = 'AdamW'
+    # config["optimizer"]["lr"] = 3e-3 # 2e-3 #
+    # config["optimizer"]["beta2"] = 0.98
+    # config["optimizer"]["weight_decay"] = 0.01
+    # config["optimizer"]["scheduler"]["lr_min"] = 1e-3 # 6e-4 #
+    # config["train"]["optim_step_batch_size"] = 256
     # # NOTE: TEST!!!
-    
-    # config["model"]["is_gate"] = True
-    # config["model"]["d_ff"] = 2016 if config["model"]["is_gate"] else 3072
-    config["model"]["d_ff"] = 4032 // 3 if config["model"]["is_gate"] else 6144 // 3
 
-    # lr = 1e-4
-    # config["optimizer"]["lr"] = lr
-    # config["optimizer"]["scheduler"]["lr_min"] = lr / 10
-    for num_heads in [16]: # 
-        config["model"]["num_heads"] = num_heads
-        main(config)
+    # config["model"]["d_ff"] = 4032 // 3 if config["model"]["is_gate"] else 6144 // 3
+    
+    lr_base = 1e-4
+    config["model"]["num_layers"] = 12
+    for bs in [256]: 
+        config["train"]["optim_step_batch_size"] = bs
+        lr = lr_base * (bs / 256) ** 0.5
+        config["optimizer"]["lr"] = lr
+        config["optimizer"]["scheduler"]["lr_min"] = lr / 10
+        main(config, seed)
