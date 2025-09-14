@@ -6,14 +6,14 @@ dataset_path:
 device: 0 # currently no distributed training
 model:
   vocab_size: 32_000
-  context_length: 256 # 512
-  d_model: 768 # 512 # 1024 #  1536 # (dimensions used in many small Transformer papers)
-  d_ff:  2016 #1344 # 2688 # 6144 3072 #  ~8/3 d_model; 64x, which is good for GPU performance.
+  context_length: 128 # 256 # 512
+  d_model:  512 # 1024 # 768 #    (dimensions used in many small Transformer papers)
+  d_ff:  1344 # 2688 # 2016 # 3072 # 6144   ~8/3 d_model; 64x, which is good for GPU performance.
   activation: "SiLU"
   is_gate: True
   rope_theta: 10_000
-  num_layers: 8 # 4
-  num_heads: 12 # 16 # 17M non-embedding parameters
+  num_layers: 6 # 4
+  num_heads: 16 # 16 # 17M non-embedding parameters
   dtype: 'amp' # 'float32' # 
   norms: # can be either 'RMSNorm', 'LayerNorm', None
     before: 'RMSNorm'
@@ -26,7 +26,7 @@ model:
   # load_name: "exp_bs_64_step_bs_64/loss_init/cosine/steps_40000/warmup_2000/Lion_tr/lrmax3e-3_lrmin3e-4_wdecay5e-4/dmodel_512_dff_1344_numlayers_4_numheads_16_cntx_256/20250830_203128/ckpt_best.pt"
 optimizer:
   name:  'Lion' # 'AdamW' # 'Lion' #
-  lr: 7e-5
+  lr: 1e-4
   beta: 0.9
   beta1: 0.9 # 0.98 # 
   beta2: 0.999 # 0.92 # 
@@ -43,7 +43,7 @@ optimizer:
   clip_gradient:
     max_norm: 1.0
 train:
-  total_tokens_processed: 819_200_000 # 1_638_400_000 # 327_680_000 # 655_360_000 #  983_040_000  batch_size x step_count x context_length
+  total_tokens_processed: 1_638_400_000 # 1_228_800_000 # 409_600_000 # 327_680_000 # 819_200_000 #   655_360_000 #  983_040_000  batch_size x step_count x context_length
   batch_size: 64
   optim_step_batch_size: 128 # 2560 # 1280
   loader_mode: 'in_memory_ids' # 'sample' # ,
@@ -60,3 +60,4 @@ serialize: # and heavy_eval
   near_end_threshold: 5000
   num_samples: 1280
   frequency: 0.1 # assumed that we don't have gradient accumulation
+debug: False
