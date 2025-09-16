@@ -1,4 +1,3 @@
-from torch import einsum
 import torch
 from torch import nn
 from einops import rearrange, einsum
@@ -37,7 +36,7 @@ class Transformer(nn.Module):
         else:
             self.res_ln1 = RMSNorm(d_model=d_model, device=device, dtype=dtype) if norms["residual"] == "RMSNorm" else LayerNorm(d_model=d_model, device=device, dtype=dtype) 
             self.res_ln2 = RMSNorm(d_model=d_model, device=device, dtype=dtype) if norms["residual"] == "RMSNorm" else LayerNorm(d_model=d_model, device=device, dtype=dtype)
-        
+
         self.attn = MultiHeadSelfAttention(d_model = d_model, num_heads = num_heads, theta = theta, context_length = context_length, device = device, dtype = dtype)
         ffn = GatedFFN if is_gate else FFN
         self.ffn = ffn(d_model = d_model, d_hidden = d_ff, activation = activation, device = device, dtype = dtype)
@@ -61,28 +60,26 @@ class TransformerLM(nn.Module):
         assert norms.get("final", None) in {"RMSNorm", "LayerNorm", None}
         self.context_length = context_length
         self.token_embeddings = Embedding(num_embeddings = vocab_size, embedding_dim = d_model, device = device, dtype = dtype)
+        
         self.layers = nn.Sequential(
             *[Transformer(d_model = d_model, d_ff = d_ff, num_heads = num_heads, activation = activation, is_gate = is_gate, theta = theta, context_length = context_length, norms = norms, device = device, dtype = dtype) for _ in range(num_layers)]
         )
-        self.ln_final = RMSNorm(d_model=d_model, device=device, dtype=dtype)
+
         if norms["final"] is None:
             self.ln_final = nn.Identity()
         else:
             self.ln_final = RMSNorm(d_model=d_model, device=device, dtype=dtype) if norms["final"] == "RMSNorm" else LayerNorm(d_model=d_model, device=device, dtype=dtype)
- 
-        self.lm_head = Linear(d_model, vocab_size, device=device,dtype=dtype)
-        self.wt = weights_tying
-        self.d_model = d_model
-        if self.wt:
-            self.lm_head.W = self.token_embeddings.emb
+        
+        tied_weight = self.token_embeddings.emb if weights_tying else None
+        self.lm_head = Linear(d_model, vocab_size, tied_weight = tied_weight, device=device,dtype=dtype)
     
     def forward(self, token_ids, prob: bool = False, tau: float = 1.0):
         x = self.token_embeddings(token_ids)
         x = self.layers(x)
         x = self.ln_final(x)
         logits = self.lm_head(x)
-        if self.wt:
-            logits /= self.d_model ** 0.5
+        # if self.wt:
+        #     logits /= self.d_model ** 0.5
         if not prob:
             return logits
         probs = softmax(logits, dim= -1, tau = tau)
