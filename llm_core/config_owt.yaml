@@ -6,15 +6,15 @@ dataset_path:
 device: 0 # currently no distributed training
 model:
   vocab_size: 32_000
-  context_length: 128 # 256 # 512
+  context_length: 256 # 256 # 512
   d_model:  512 # 1024 # 768 #    (dimensions used in many small Transformer papers)
   d_ff:  1344 # 2688 # 2016 # 3072 # 6144   ~8/3 d_model; 64x, which is good for GPU performance.
   activation: "SiLU"
   is_gate: True
   rope_theta: 10_000
-  num_layers: 6 # 4
+  num_layers: 4 # 4
   num_heads: 16 # 16 # 17M non-embedding parameters
-  dtype: 'amp' # 'float32' # 
+  dtype: 'amp'
   norms: # can be either 'RMSNorm', 'LayerNorm', None
     before: 'RMSNorm'
     after: 'RMSNorm'
@@ -43,7 +43,7 @@ optimizer:
   clip_gradient:
     max_norm: 1.0
 train:
-  total_tokens_processed: 1_638_400_000 # 1_228_800_000 # 409_600_000 # 327_680_000 # 819_200_000 #   655_360_000 #  983_040_000  batch_size x step_count x context_length
+  total_tokens_processed: 327_680_000 # 1_638_400_000 # 1_228_800_000 # 409_600_000 # 819_200_000 #   655_360_000 #  983_040_000  batch_size x step_count x context_length
   batch_size: 64
   optim_step_batch_size: 128 # 2560 # 1280
   loader_mode: 'in_memory_ids' # 'sample' # ,
@@ -51,7 +51,7 @@ train:
   compile: True
 validate:
   frequency: 0.1 # assumed that we don't have gradient accumulation
-  eval_steps: {0.25, 0.5, 0.75}
+  eval_steps: {0.5} # {0.25, 0.5, 0.75}
   num_samples: 32_000 # '-1' means the full validation set
 serialize: # and heavy_eval
   path: "weights"
@@ -60,4 +60,5 @@ serialize: # and heavy_eval
   near_end_threshold: 5000
   num_samples: 1280
   frequency: 0.1 # assumed that we don't have gradient accumulation
+  postfix: ""
 debug: False

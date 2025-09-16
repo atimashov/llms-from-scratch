@@ -19,7 +19,7 @@ seed = 123
 torch.manual_seed(seed)
 torch.set_float32_matmul_precision('high')
 
-def train_loop(model, optimizer, tokens, loss_fn, scheduler_params, max_norm, run_params, config = None):
+def train_loop(model, optimizer, tokens, loss_fn, scheduler_params, max_norm, run_params, config = None, flops_per_token: int = 0):
     # unpack params
     steps = run_params["steps"]
     eval_steps = {int(r * steps) for r in config["validate"]["eval_steps"]}
@@ -140,7 +140,7 @@ def train_loop(model, optimizer, tokens, loss_fn, scheduler_params, max_norm, ru
                 writer.add_scalar("train/grad_norm/post_clip", g_norm_post, step)
         else:
             g_norm_pre = compute_grad_norm(model)
-        if not_debug:
+        if not debug:
             writer.add_scalar("train/grad_norm/pre_clip", g_norm_pre, step)
             
         
@@ -150,13 +150,16 @@ def train_loop(model, optimizer, tokens, loss_fn, scheduler_params, max_norm, ru
         else:
             # TODO: DELETE after testing trust_ratio
             param_to_name = {param: name for name, param in model.named_parameters()}
-            optimizer.step(None, param_to_name) # TODO: DELETE
-
-        # optimizer.step()
+            if config["optimizer"]["name"] == "Lion":
+                optimizer.step(None, param_to_name) # TODO: DELETE
+            else:
+                optimizer.step()
         if not debug:
             # log 'tokens per second'
             tokens_per_sec = os_bs * context_length / (perf_counter() - t_step)
+            flops_per_sec = flops_per_token * os_bs * context_length / (perf_counter() - t_step)
             writer.add_scalar("train/tokens_per_sec", tokens_per_sec, step)
+            writer.add_scalar("train/forward_flops_per_sec", flops_per_sec, step)
 
         # run eval of large subset of train and valid datasets if asked
         if not debug and step + 1 in eval_steps and step + 1 != steps:
@@ -213,6 +216,12 @@ def main(config, random_seed = 123):
         f"{colored('w_tying=', 'blue')}{config['model']['weights_tying']} | " 
     )
     print_d_model_d_ff(model_params["d_model"], model_params["d_ff"], model_params['is_gate'])
+    
+    # FLOPS estimations
+    flops_per_token = est_forward_flops(config)
+    total_tokens = config["train"]["total_tokens_processed"]
+    print(f"{colored('Estimated number of FLOPS (per token) = ', 'blue')}{flops_per_token:,}")
+    print(f"{colored('Estimated number of FLOPS (total) = ', 'blue')}{flops_per_token * total_tokens:.2e}")
 
     # get experiments
     model = TransformerLM(**model_params).to(model_params["device"]) # NOTE: I sent to device explicitely. Not sure if it makes sense.
@@ -225,13 +234,18 @@ def main(config, random_seed = 123):
         "train": np.load(tokens_params["train"], mmap_mode='r'),
         "valid": np.load(tokens_params["valid"], mmap_mode='r')
     }
+    # details of the model
     print(
-        colored("Model parameters: ", 'blue') + f"{count_parameters(model):,} | "
+        f"{colored("Model parameters: ", 'blue')}{count_parameters(model):,} | "
         f"{colored('num_layers=', 'blue')}{model_params["num_layers"]:,} | "
         f"{colored('num_heads=', 'blue')}{model_params["num_heads"]:,} | "
         f"{colored('d_model=', 'blue')}{model_params["d_model"]:,} | "
         f"{colored('d_ff=', 'blue')}{model_params["d_ff"]:,} |"
     )
+    memories_stat = get_expected_memory(config)
+    print_memory_stats(memories_stat)
+
+    # details of the loader
     print(
         f"{colored("Loader size: ", 'blue')} "
         f"{colored('train=', 'blue')}{tokens['train'].shape[0]:,} | "
@@ -261,24 +275,52 @@ if __name__ == '__main__':
     with open(inputs.config, 'r') as stream:
         config = yaml.safe_load(stream)
 
-    config["device"] = 0
-    # config["model"]["activation"] = "SqReLU"
-    # config["model"]["is_gate"] = False
-    # # NOTE: TEST!!!
-    # config["optimizer"]["name"] = 'AdamW'
-    # config["optimizer"]["lr"] = 3e-3 # 2e-3 #
-    # config["optimizer"]["beta2"] = 0.98
-    # config["optimizer"]["weight_decay"] = 0.01
-    # config["optimizer"]["scheduler"]["lr_min"] = 1e-3 # 6e-4 #
-    # config["train"]["optim_step_batch_size"] = 256
-    # # NOTE: TEST!!!
+    # config["device"] = 0
+    config["model"]["d_model"] = 1024
+    config["model"]["num_layers"] = 12
+    config["serialize"]["postfix"] = "winit2e-2_xav"
+    # config["model"]["context_length"] = 352
 
-    # config["model"]["d_ff"] = 4032 // 3 if config["model"]["is_gate"] else 6144 // 3
-    
-    lr_base = 1e-4
-    for bs in [256]: 
-        config["train"]["optim_step_batch_size"] = bs
-        lr = lr_base * (bs / 256) ** 0.5
-        config["optimizer"]["lr"] = lr
-        config["optimizer"]["scheduler"]["lr_min"] = lr / 10
+
+    config["device"] = 1
+    # config["model"]["d_model"] = 512
+    # config["model"]["num_layers"] = 4
+    config["model"]["context_length"] = 256
+
+
+
+    config["model"]["activation"] = "SiLU"
+    config["model"]["is_gate"] = True
+    if config["model"]["is_gate"]:
+        config["model"]["d_ff"] = config["model"]["d_model"] * 8 // 3 
+    else:
+        config["model"]["d_ff"] = config["model"]["d_model"] * 4
+    # config["optimizer"]["name"] = 'AdamW'
+    # config["optimizer"]["lr"] = 5e-3 # 2e-3 #
+    config["optimizer"]["name"] = 'Lion'
+    config["optimizer"]["lr"] = 2e-4
+    config["optimizer"]["weight_decay"] = 0.1
+    config["optimizer"]["scheduler"]["lr_min"] = 1e-5
+    # config["optimizer"]["scheduler"]["lr_min"] = 3e-5
+    # config["optimizer"]["beta1"] = 0.9
+    # config["optimizer"]["beta2"] = 0.98
+    config["train"]["batch_size"] = 32
+    config["train"]["optim_step_batch_size"] = 256
+
+
+
+    # number of FLOPS and token count
+    flops_per_token = est_forward_flops(config)
+    steps =  int(4 * 10**16 / flops_per_token / config["train"]["optim_step_batch_size"] / config["model"]["context_length"])
+    config["train"]["total_tokens_processed"] = steps * config["train"]["optim_step_batch_size"] * config["model"]["context_length"]
+    config["optimizer"]["scheduler"]["warmup_iters"] = min(max(50, int(0.05 * steps)), 100)
+
+    for act, is_gated in [['SiLU', True], ['SqReLU', False]]: # , 'amp'
+        config["model"]["activation"] = act
+        config["model"]["is_gate"] = is_gated
+        if config["model"]["is_gate"]:
+            config["model"]["d_ff"] = config["model"]["d_model"] * 8 // 3 
+        else:
+            config["model"]["d_ff"] = config["model"]["d_model"] * 4
+
         main(config, seed)
