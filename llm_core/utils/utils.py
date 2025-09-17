@@ -62,19 +62,35 @@ def cross_entropy(logits: torch.Tensor, target: torch.Tensor, z_alpha:float = 0.
 def perplexity(logits: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
     return torch.exp(cross_entropy(logits, target, 0.0))
 
-def cosine_lr_schedule(t: int, lr_max: float, lr_min: float, warmup_iters: int, cosine_cycle_iters: int):
+def cosine_lr_schedule(t: int, lr_max: float, lr_min: float, warmup_iters: int, flat_iters: int, cosine_cycle_iters: int):
     assert warmup_iters >= 0, f"Invalid warmup iterations: {warmup_iters}"
     assert  cosine_cycle_iters > warmup_iters, f"Invalid cosine cycle iterations: {cosine_cycle_iters}"
     # warm up
     if t < warmup_iters:
-        lr = t / warmup_iters * lr_max
-    # annealing
-    elif t <= cosine_cycle_iters:
-        lr = lr_min + 0.5 * (1 + math.cos((t - warmup_iters) / (cosine_cycle_iters - warmup_iters) * math.pi)) * (lr_max - lr_min)
+        return t / warmup_iters * lr_max
+    # flat
+    if t < flat_iters:
+        return lr_max
+    # cosine annealing
+    if t < cosine_cycle_iters:
+        return lr_min + 0.5 * (1 + math.cos((t - flat_iters) / (cosine_cycle_iters - flat_iters) * math.pi)) * (lr_max - lr_min)
     # post annealing
-    else:
-        lr = lr_min
-    return lr
+    return lr_min
+
+def cosine_with_drops_lr_shedule(t: int, lr_max: float, lr_min: float, warmup_iters: int, flat_iters: int, cosine_cycle_iters: int, n_drops: int = 2, ratio: float = 0.1):
+    # base cosine schedule
+    base_lr = cosine_lr_schedule(t, lr_max, lr_min, warmup_iters, flat_iters, cosine_cycle_iters)
+
+    # only apply drops after flat_iters
+    if t < flat_iters:
+        return base_lr
+
+    # figure out which drop stage we’re in
+    cosine_steps = cosine_cycle_iters - flat_iters
+    stage = min(n_drops, (t - flat_iters) * (n_drops + 1) // cosine_steps)
+
+    # scale learning rates
+    return base_lr * (ratio ** stage)
 
 def gradient_clipping(model, max_l2_norm: float, eps: float = 1e-6):
     """
@@ -270,7 +286,7 @@ def parse_optim(config_opt):
         optimizer_params["betas"] = (config_opt["beta1"], config_opt["beta2"], config_opt["beta3"])
         optimizer_params["eps"] = float(config_opt["epsilon"])
     elif config_opt["name"] == "Lion":
-        optimizer_params["beta"] = config_opt["beta"]
+        optimizer_params["betas"] = (config_opt["beta1"], config_opt["beta2"])
         optimizer_params["is_trust_ratio"] = config_opt["is_trust_ratio"]
         optimizer_params["nesterov"] = config_opt["nesterov"]
     return optimizer_params
@@ -340,6 +356,7 @@ def parse_config(config, mode: str = "train"):
         steps = (config["train"]["total_tokens_processed"] + os_bs * cntx - 1) // (os_bs * cntx)
         lr_max, lr_min = float(config["optimizer"]["lr"]), float(config["optimizer"]["scheduler"]["lr_min"])
         warmup_iters = config["optimizer"]["scheduler"]["warmup_iters"]
+        flat_iters = warmup_iters + int(config["optimizer"]["scheduler"]["flat_iters"] * steps)
         cosine_cycle_iters= int(config["optimizer"]["scheduler"]["cosine_cycle_iters"] * steps)
 
         # optimizer parameters
@@ -351,8 +368,13 @@ def parse_config(config, mode: str = "train"):
             "lr_max": lr_max,
             "lr_min": lr_min,
             "warmup_iters": warmup_iters,
+            "flat_iters": flat_iters,
             "cosine_cycle_iters":cosine_cycle_iters,
         }
+        if config["optimizer"]["scheduler"]["name"] == "cosine_with_drops":
+            scheduler_params["n_drops"] = config["optimizer"]["scheduler"]["n_drops"]
+            scheduler_params["ratio"] = config["optimizer"]["scheduler"]["ratio"]
+
 
         # clip_grad
         clip_grad_params = {"max_norm": config["optimizer"].get("clip_gradient", {}).get("max_norm", None)}

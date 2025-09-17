@@ -180,16 +180,16 @@ class Adam(Optimizer):
 
 
 class Lion(Optimizer):
-    def __init__(self, params: Iterable[nn.Parameter], lr: float = 5e-4, beta: float = 0.9, nesterov: bool = False, weight_decay: float = 0.0, is_trust_ratio: bool = False, eps: float = 1e-8):
+    def __init__(self, params: Iterable[nn.Parameter], lr: float = 5e-4, betas: tuple = (0.9, 0.99), nesterov: bool = False, weight_decay: float = 0.0, is_trust_ratio: bool = False, eps: float = 1e-8):
         if lr < 0:
             raise ValueError(f"Invalid learning rate: {lr}")
-        super().__init__(params, dict(lr=lr, beta = beta, nesterov = nesterov, weight_decay = weight_decay, is_trust_ratio = is_trust_ratio, eps = eps))
+        super().__init__(params, dict(lr=lr, betas = betas, nesterov = nesterov, weight_decay = weight_decay, is_trust_ratio = is_trust_ratio, eps = eps))
 
     def step(self, closure: Callable | None = None, param_to_name: Dict | None = None):
         loss = None if closure is None else closure()
         for group in self.param_groups:
             lr = group["lr"]
-            beta = group["beta"]
+            beta1, beta2 = group["betas"]
             nesterov = group["nesterov"]
             weight_decay = group["weight_decay"]
             is_trust_ratio = group["is_trust_ratio"]
@@ -202,14 +202,14 @@ class Lion(Optimizer):
                 state = self.state[p]
                 grad = p.grad.data
 
-                if "v" not in state:
-                    state["v"] = torch.zeros_like(grad)
+                if "m" not in state:
+                    state["m"] = torch.zeros_like(grad)
 
                 # Get Trust Ratio (per layer)
                 if is_trust_ratio: # TODO: remove 'bias', 'bn', 'layernorm' etc.
                     param_norm = torch.norm(p.data)
                     # grad_norm = torch.norm(p.grad) # we apply raw gradient without L2 weight deacy
-                    update_vec = torch.sign(state["v"])
+                    update_vec = torch.sign(state["m"])
                     update_norm = torch.norm(update_vec)
                     trust_ratio = 1.0 if param_norm == 0 or update_norm == 0 else param_norm / (update_norm + eps) #(grad_norm + eps)
                     step_size = lr * trust_ratio
@@ -223,14 +223,14 @@ class Lion(Optimizer):
                 if nesterov:
                     raise NotImplementedError("This method has not been implemented yet.")
                 else:
-                    state["v"].mul_(beta).add_(grad, alpha = 1 - beta)
-                    
                     # Decoupled weight decay
                     if weight_decay > 0:
                         p.data.mul_(1 - step_size * weight_decay)
-                    
                     # Optimizer Step
-                    p.data.add_(torch.sign(state["v"]), alpha = -step_size)
+                    update = beta1 * state["m"] + (1-beta1) * grad
+                    p.data.add_(torch.sign(update), alpha = -step_size)
+                    # State Update
+                    state["m"].mul_(beta2).add_(grad, alpha = 1 - beta2)
         return loss
 
 
