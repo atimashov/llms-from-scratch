@@ -1,5 +1,6 @@
 import torch
 from torch.utils.tensorboard import SummaryWriter
+import wandb
 from torch.amp import autocast, GradScaler
 
 from tqdm import tqdm
@@ -39,7 +40,9 @@ def train_loop(model, optimizer, tokens, loss_fn, scheduler_params, max_norm, ru
     lr = scheduler_params["lr_max"]
     num_tokens = tokens["train"].shape[0]
     is_amp = config["model"]["dtype"] == "amp"
+    autocast_dtype = run_params["autocast_dtype"]
     debug = config["debug"]
+    logger_name = run_params["logger_name"]
     
     # init indices
     if loader_mode == "sample":
@@ -52,7 +55,11 @@ def train_loop(model, optimizer, tokens, loss_fn, scheduler_params, max_norm, ru
 
     # init logging and serialization
     if not debug:
-        writer = SummaryWriter(log_dir=f"runs/{run_name}")
+        if logger_name == "wandb":
+            wandb.init(project = "llms-from-scratch", name = run_name, config = config)
+        else:
+            writer = SummaryWriter(log_dir=f"runs/{run_name}")
+        
         ckpt_path = Path(serialize_path) / run_name / "ckpt_best.pt"
         ckpt_path.parent.mkdir(parents=True, exist_ok=True)
     
@@ -81,8 +88,7 @@ def train_loop(model, optimizer, tokens, loss_fn, scheduler_params, max_norm, ru
         for i in range(accum_steps):
             start_seqs = get_start_seqs(step * os_bs + i * batch_size, batch_size, tokens["train"].shape[0] - context_length, im_ids, loader_mode)
             tokens_curr, tokens_next = data_loading(tokens["train"], context_length, start_seqs, device)
-            
-            with autocast('cuda', enabled = is_amp):
+            with autocast('cuda', enabled = is_amp, dtype=autocast_dtype):
                 logits = model(tokens_curr)
                 loss = loss_fn(logits, tokens_next)
             
@@ -118,32 +124,55 @@ def train_loop(model, optimizer, tokens, loss_fn, scheduler_params, max_norm, ru
 
         # log train params to tensorboard
         if not debug:
-            writer.add_scalar("train/lr", optimizer.param_groups[0]['lr'], step)
-            writer.add_scalar("train/loss", loss_acc, step)
-            writer.add_scalar("train/perplexity", float('inf') if loss_acc > 20 else np.exp(loss_acc), step)
-            writer.add_scalar("train/logits_norm", logits_norm_acc, step)
-            writer.add_scalar("train/logits_max", logits_max_acc, step)
-            writer.add_scalar("train/logits_std", logits_std_acc, step)
+            if logger_name == "wandb":
+                wandb.log({
+                    "lr": optimizer.param_groups[0]['lr'],
+                    "train/loss": loss_acc,
+                    "train/perplexity": float('inf') if loss_acc > 20 else np.exp(loss_acc),
+                    "train/logits_norm": logits_norm_acc,
+                    "train/logits_max": logits_max_acc,
+                    "train/logits_std": logits_std_acc,
+                }, step=step)
+            else:
+                writer.add_scalar("lr", optimizer.param_groups[0]['lr'], step)
+                writer.add_scalar("train/loss", loss_acc, step)
+                writer.add_scalar("train/perplexity", float('inf') if loss_acc > 20 else np.exp(loss_acc), step)
+                writer.add_scalar("train/logits_norm", logits_norm_acc, step)
+                writer.add_scalar("train/logits_max", logits_max_acc, step)
+                writer.add_scalar("train/logits_std", logits_std_acc, step)
+            
 
             # log validate params and log in tensorboard
             if step % valid_every == 0:
                 valid_loss = eval_batch(tokens["valid"], model, loss_fn, context_length, batch_size, device)
-                writer.add_scalar("valid/loss", valid_loss, step)
-                writer.add_scalar("valid/perplexity", float('inf') if valid_loss > 20 else np.exp(valid_loss), step)
+                if logger_name == "wandb":
+                    wandb.log({
+                        "valid/loss": valid_loss,
+                        "valid/perplexity": float('inf') if valid_loss > 20 else np.exp(valid_loss),
+                    }, step=step)
+                else:
+                    writer.add_scalar("valid/loss", valid_loss, step)
+                    writer.add_scalar("valid/perplexity", float('inf') if valid_loss > 20 else np.exp(valid_loss), step)
 
         # clip gradients
         if max_norm is not None:
             if is_amp:
                 scaler.unscale_(optimizer)
             g_norm_pre, g_norm_post = gradient_clipping(model, max_l2_norm= max_norm)
-            if not debug:
-                writer.add_scalar("train/grad_norm/post_clip", g_norm_post, step)
         else:
             g_norm_pre = compute_grad_norm(model)
+            g_norm_post = None
         if not debug:
-            writer.add_scalar("train/grad_norm/pre_clip", g_norm_pre, step)
+            if logger_name == "wandb":
+                log_data = {"train/grad_norm/pre_clip": g_norm_pre}
+                if g_norm_post is not None:
+                    log_data["train/grad_norm/post_clip"] = g_norm_post
+                wandb.log(log_data, step=step)
+            else:
+                writer.add_scalar("train/grad_norm/pre_clip", g_norm_pre, step)
+                if g_norm_post is not None:
+                    writer.add_scalar("train/grad_norm/post_clip", g_norm_post, step)
             
-        
         if is_amp: # NOTE: it will not work with Lion_tr
             scaler.step(optimizer)
             scaler.update()
@@ -158,12 +187,22 @@ def train_loop(model, optimizer, tokens, loss_fn, scheduler_params, max_norm, ru
             # log 'tokens per second'
             tokens_per_sec = os_bs * context_length / (perf_counter() - t_step)
             flops_per_sec = flops_per_token * os_bs * context_length / (perf_counter() - t_step)
-            writer.add_scalar("train/tokens_per_sec", tokens_per_sec, step)
-            writer.add_scalar("train/forward_flops_per_sec", flops_per_sec, step)
+            if logger_name == "wandb":
+                wandb.log({
+                    "train/tokens_per_sec": tokens_per_sec,
+                    "train/forward_flops_per_sec": flops_per_sec,
+                }, step=step)
+            else:
+                writer.add_scalar("train/tokens_per_sec", tokens_per_sec, step)
+                writer.add_scalar("train/forward_flops_per_sec", flops_per_sec, step)
 
         # run eval of large subset of train and valid datasets if asked
         if not debug and step + 1 in eval_steps and step + 1 != steps:
-            log_evals(ckpt_path, step, t_train, tokens, model, optimizer, loss_fn, config, writer, use_amp = is_amp)
+            summary = log_evals(ckpt_path, step, t_train, tokens, model, optimizer, loss_fn, config, use_amp = is_amp)
+            if logger_name == "wandb":
+                wandb.run.summary[f"summary_at_step_{step + 1}"] = summary
+            else:
+                writer.add_text("summary/final_valid_metrics", summary, step+1)
 
         # update progress bar
         loop.set_postfix(
@@ -176,10 +215,13 @@ def train_loop(model, optimizer, tokens, loss_fn, scheduler_params, max_norm, ru
         )
     # run the best model on the large subsets of train and valid set
     if not debug:
-        log_evals(ckpt_path, step, t_train, tokens, model, optimizer, loss_fn, config, writer, use_amp = is_amp)
-    
-        # close writer
-        writer.close()
+        summary = log_evals(ckpt_path, step, t_train, tokens, model, optimizer, loss_fn, config, use_amp = is_amp)
+        if logger_name == "wandb":
+                wandb.run.summary[f"summary_at_step_{step + 1}"] = summary
+                wandb.finish()
+        else:
+            writer.add_text("summary/final_valid_metrics", summary, step+1)
+            writer.close()            
 
 def main(config, random_seed = 123):
     # control source of randonmess
@@ -187,6 +229,7 @@ def main(config, random_seed = 123):
 
     # parse parameters
     model_params, ckpt_path, optimizer_params, scheduler_params, clip_grad_params, tokens_params, run_params = parse_config(config)
+    config["device_name"] = run_params["device_name"]
     max_norm = clip_grad_params["max_norm"]
 
     # print intro
@@ -220,8 +263,7 @@ def main(config, random_seed = 123):
     # FLOPS estimations
     flops_per_token = est_forward_flops(config)
     total_tokens = config["train"]["total_tokens_processed"]
-    print(f"{colored('Estimated number of FLOPS (per token) = ', 'blue')}{flops_per_token:,}")
-    print(f"{colored('Estimated number of FLOPS (total) = ', 'blue')}{flops_per_token * total_tokens:.2e}")
+    print(f"{colored('Estimated number of FLOPS: ', 'blue')} per_token={flops_per_token:,} | total={flops_per_token * total_tokens:.2e}")
 
     # get experiments
     model = TransformerLM(**model_params).to(model_params["device"]) # NOTE: I sent to device explicitely. Not sure if it makes sense.
@@ -235,12 +277,14 @@ def main(config, random_seed = 123):
         "valid": np.load(tokens_params["valid"], mmap_mode='r')
     }
     # details of the model
+    cnt_params = count_parameters(model)
     print(
-        f"{colored("Model parameters: ", 'blue')}{count_parameters(model):,} | "
+        f"{colored("Model parameters: ", 'blue')}{cnt_params:,} | "
         f"{colored('num_layers=', 'blue')}{model_params["num_layers"]:,} | "
         f"{colored('num_heads=', 'blue')}{model_params["num_heads"]:,} | "
         f"{colored('d_model=', 'blue')}{model_params["d_model"]:,} | "
         f"{colored('d_ff=', 'blue')}{model_params["d_ff"]:,} |"
+        f"{colored('Ratio tokens/model_size=', 'blue')}{total_tokens/cnt_params:.2f} |"
     )
     memories_stat = get_expected_memory(config)
     print_memory_stats(memories_stat)
@@ -260,7 +304,7 @@ def main(config, random_seed = 123):
     # run training loop
     if config["train"]["compile"]:
         model = torch.compile(model)
-    train_loop(model, optimizer, tokens, loss_fn, scheduler_params, max_norm, run_params, config)
+    train_loop(model, optimizer, tokens, loss_fn, scheduler_params, max_norm, run_params, config, flops_per_token)
     print(colored("-" * 200, "cyan", attrs=["bold"]))
 
 if __name__ == '__main__':
@@ -275,52 +319,46 @@ if __name__ == '__main__':
     with open(inputs.config, 'r') as stream:
         config = yaml.safe_load(stream)
 
-    # config["device"] = 0
-    config["model"]["d_model"] = 1024
-    config["model"]["num_layers"] = 12
     config["serialize"]["postfix"] = "winit2e-2_xav"
-    # config["model"]["context_length"] = 352
 
-
-    config["device"] = 1
-    # config["model"]["d_model"] = 512
-    # config["model"]["num_layers"] = 4
-    config["model"]["context_length"] = 256
-
-
-
-    config["model"]["activation"] = "SiLU"
-    config["model"]["is_gate"] = True
-    if config["model"]["is_gate"]:
-        config["model"]["d_ff"] = config["model"]["d_model"] * 8 // 3 
-    else:
-        config["model"]["d_ff"] = config["model"]["d_model"] * 4
-    # config["optimizer"]["name"] = 'AdamW'
-    # config["optimizer"]["lr"] = 5e-3 # 2e-3 #
-    config["optimizer"]["name"] = 'Lion'
-    config["optimizer"]["lr"] = 2e-4
-    config["optimizer"]["weight_decay"] = 0.1
-    config["optimizer"]["scheduler"]["lr_min"] = 1e-5
-    # config["optimizer"]["scheduler"]["lr_min"] = 3e-5
-    # config["optimizer"]["beta1"] = 0.9
-    # config["optimizer"]["beta2"] = 0.98
-    config["train"]["batch_size"] = 32
-    config["train"]["optim_step_batch_size"] = 256
-
+    def update_config(config, mode = 'baseline'):
+        if mode == 'test':
+            config["train"]["batch_size"] = 32 # NOTE: only for RTX5090
+            config["model"]["context_length"] = 352
+            config["model"]["d_model"] = 1024
+            config["model"]["d_ff"] = 2688
+            config["model"]["weights_tying"] = True
+            config["model"]["num_layers"] = 16
+            config["model"]["num_heads"] = 16
+            config["model"]["norms"] = {
+                'before': 'RMSNorm',
+                'after': None,
+                'residual': None,
+                'final': 'RMSNorm'
+            }
+            config["optimizer"]["name"] = 'AdamW'
+            config["optimizer"]["lr"] = 5e-3
+            config["optimizer"]["beta1"] = 0.9
+            config["optimizer"]["beta2"] = 0.98
+    
+            config["optimizer"]["scheduler"]["lr_min"] = 3e-5
+            config["optimizer"]["scheduler"]["warmup_iters"] = 2000
+            config["optimizer"]["scheduler"]["cosine_cycle_iters"] = 1.0
+        
+        return config
 
 
     # number of FLOPS and token count
-    flops_per_token = est_forward_flops(config)
-    steps =  int(4 * 10**16 / flops_per_token / config["train"]["optim_step_batch_size"] / config["model"]["context_length"])
-    config["train"]["total_tokens_processed"] = steps * config["train"]["optim_step_batch_size"] * config["model"]["context_length"]
-    config["optimizer"]["scheduler"]["warmup_iters"] = min(max(50, int(0.05 * steps)), 100)
+    # flops_per_token = est_forward_flops(config)
+    # steps =  int(4 * 10**16 / flops_per_token / config["train"]["optim_step_batch_size"] / config["model"]["context_length"])
+    # config["train"]["total_tokens_processed"] = steps * config["train"]["optim_step_batch_size"] * config["model"]["context_length"]
+    # config["optimizer"]["scheduler"]["warmup_iters"] = min(max(50, int(0.05 * steps)), 100)
 
-    for act, is_gated in [['SiLU', True], ['SqReLU', False]]: # , 'amp'
-        config["model"]["activation"] = act
-        config["model"]["is_gate"] = is_gated
-        if config["model"]["is_gate"]:
-            config["model"]["d_ff"] = config["model"]["d_model"] * 8 // 3 
-        else:
-            config["model"]["d_ff"] = config["model"]["d_model"] * 4
-
-        main(config, seed)
+    # config["device"] = 1
+    # config = update_config(config, 'test')
+    config["train"]["total_tokens_processed"] //= 2
+    for init_type in ["xavier", "lecun"]:
+        config["model"]["inits"]["type_ff"] = init_type    
+        for std in [1.0, 0.02]:
+            config["model"]["inits"]["std_emb"] = std
+            main(config, seed)

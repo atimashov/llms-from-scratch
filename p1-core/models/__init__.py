@@ -1,3 +1,3 @@
-from .transformer import Transformer, TransformerLM
+from .transformer import TransformerBlock, TransformerLM
 
 __all__ = [TransformerLM]

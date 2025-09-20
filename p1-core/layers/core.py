@@ -22,7 +22,7 @@ class Linear(nn.Module):
         - dtype: Data type of the parameters 
     """
     def __init__(
-        self, in_features: int, out_features: int, tied_weight: nn.Parameter | None = None, 
+        self, in_features: int, out_features: int, init_type: str = 'xavier', clip_w: float = 3.0, tied_weight: nn.Parameter | None = None, 
         device: torch.device | None = None, dtype: torch.dtype | None = None
         ):
         super().__init__()
@@ -34,9 +34,18 @@ class Linear(nn.Module):
             self.W = tied_weight
         else:
             # create new weight
-            std = (2 / (in_features + out_features)) ** 0.5
+            if init_type == "xavier":
+                std = (2 / (in_features + out_features)) ** 0.5
+            elif init_type == "sq_xavier": # suprisingly, it worked
+                std = 2 / (in_features + out_features)
+            elif init_type == "kaiming":
+                std = (2 / in_features) ** 0.5
+            elif init_type == "lecun":
+                std = (1 / in_features) ** 0.5
+
             data = torch.empty(out_features, in_features, dtype=dtype, device=device)
-            nn.init.trunc_normal_(data, mean=0.0, std=std, a=-3.0 * std, b=3.0 * std)
+            if clip_w is not None:
+                nn.init.trunc_normal_(data, mean=0.0, std=std, a=-clip_w, b=clip_w)
             self.W = nn.Parameter(data)
     
     def forward(self, X: torch.Tensor) -> torch.Tensor:
@@ -44,11 +53,12 @@ class Linear(nn.Module):
         return einsum(X, self.W, "... d_in, d_out d_in -> ... d_out")
         
 class Embedding(nn.Module):
-    def __init__(self, num_embeddings, embedding_dim, device=None, dtype=None):
+    def __init__(self, num_embeddings, embedding_dim, std: float = 0.02, clip_w: float = 3.0, device=None, dtype=None):
         super().__init__()
         # initialize data and create embedding table
         data = torch.empty(num_embeddings, embedding_dim, dtype=dtype, device=device)
-        nn.init.trunc_normal_(data, mean=0.0, std=0.02, a=-3.0, b=3.0)
+        if clip_w is not None:
+            nn.init.trunc_normal_(data, mean=0.0, std=std, a=-clip_w, b=clip_w)
         self.emb = nn.Parameter(data)
 
     def forward(self, token_ids: torch.Tensor) -> torch.Tensor:

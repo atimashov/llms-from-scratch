@@ -2,6 +2,7 @@ from einops import rearrange, einsum
 import torch
 from torch import nn
 from .pos_enc import RoPE
+from .core import Linear
 from utils import softmax
 
 def scaled_dot_product_attention(Q: torch.Tensor, K: torch.Tensor, V: torch.Tensor, mask: torch.Tensor | None):
@@ -24,37 +25,30 @@ class MultiHeadSelfAttention(nn.Module):
     num_heads: int Number of heads to use in multi-head self-attention.
     TODO: check dtype/device correctness; add documentation; work on reproducibility (seed)
     """
-    def __init__(self, d_model: int, num_heads: int, theta: float = 10000.0, context_length = 10000, device: torch.device | None = None, dtype: torch.dtype | None = None):
+    def __init__(
+        self, d_model: int, num_heads: int, theta: float = 10000.0, context_length = 10000, 
+        init_type: str = 'xavier', clip_w: float = 3.0, device: torch.device | None = None, dtype: torch.dtype | None = None
+        ):
         super().__init__()
         assert d_model % num_heads == 0, "d_model must be divisible by num_heads"
         self.d_model, self.num_heads = d_model, num_heads
         self.d_k, self.d_v = d_model // num_heads, d_model // num_heads
         # init matrices
-        std = 2 / (num_heads * self.d_k + d_model)
-        data = torch.empty(num_heads * self.d_k, d_model, dtype=dtype, device=device)
-        nn.init.trunc_normal_(data, mean=0.0, std=std, a=-3.0 * std, b=3.0 * std)
-        self.P_Q = nn.Parameter(data)
-        data = torch.empty(num_heads * self.d_k, d_model, dtype=dtype, device=device)
-        nn.init.trunc_normal_(data, mean=0.0, std=std, a=-3.0 * std, b=3.0 * std)
-        self.P_K = nn.Parameter(data)
-        std = 2 / (num_heads * self.d_v + d_model)
-        data = torch.empty(num_heads * self.d_v, d_model, dtype=dtype, device=device)
-        nn.init.trunc_normal_(data, mean=0.0, std=std, a=-3.0 * std, b=3.0 * std)
-        self.P_V = nn.Parameter(data)
-        data = torch.empty(d_model, num_heads * self.d_v, dtype=dtype, device=device)
-        nn.init.trunc_normal_(data, mean=0.0, std=std, a=-3.0 * std, b=3.0 * std)
-        self.P_O = nn.Parameter(data)
+        self.P_Q = Linear(d_model, num_heads * self.d_k, init_type, clip_w, device = device, dtype=dtype)
+        self.P_K = Linear(d_model, num_heads * self.d_k, init_type, clip_w, device = device, dtype=dtype)
+        self.P_V = Linear(d_model, num_heads * self.d_v, init_type, clip_w, device = device, dtype=dtype)
+        self.P_O = Linear(num_heads * self.d_v, d_model, init_type, clip_w, device = device, dtype=dtype)
         # init RoPE
         self.rope = RoPE(theta = theta, d_k = self.d_k, max_seq_len= context_length, device=device, dtype = dtype) if theta is not None else None
         self.device = device
 
     def forward(self, x: torch.Tensor, is_masked: bool = True, with_rope = True, token_positions = None):
         # project x to get queries, keys and values
-        Q = einsum(x, self.P_Q, "... d, hd_k d -> ... hd_k") # unplug
+        Q = self.P_Q(x)
         Q = rearrange(Q, "... seq_len (h d_k) -> ... h seq_len d_k", h = self.num_heads)
-        K = einsum(x, self.P_K, "... d, hd_k d -> ... hd_k")
+        K = self.P_K(x)
         K = rearrange(K, "... seq_len (h d_k) -> ... h seq_len d_k", h = self.num_heads)
-        V = einsum(x, self.P_V, "... d, hd_v d -> ... hd_v")
+        V = self.P_V(x)
         V = rearrange(V, "...  seq_len (h d_v) -> ... h seq_len d_v", h = self.num_heads)
         # apply RoPE
         if with_rope and self.rope is not None:
@@ -69,5 +63,5 @@ class MultiHeadSelfAttention(nn.Module):
         scaled_mh_att = scaled_dot_product_attention(Q, K, V, mask)
         scaled_mh_att = rearrange(scaled_mh_att, "... h seq_len d_v -> ... seq_len (h d_v)")
         # project on output
-        O = einsum(scaled_mh_att, self.P_O, "... seq_len hd_v, d hd_v -> ... seq_len d")
+        O = self.P_O(scaled_mh_att) # O = einsum(scaled_mh_att, self.P_O, "... seq_len hd_v, d hd_v -> ... seq_len d")
         return O

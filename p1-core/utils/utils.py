@@ -229,7 +229,7 @@ def eval(step: int, x: npt.NDArray, model, loss_fn, context_length: int, batch_s
     model.train()
     return avg_loss
 
-def log_evals(ckpt_path: str, step: int, t_train, tokens, model, optimizer, loss_fn, config, writer, use_amp):
+def log_evals(ckpt_path: str, step: int, t_train, tokens, model, optimizer, loss_fn, config, use_amp):
     t_eval = perf_counter()
 
     # unpack variables
@@ -255,15 +255,12 @@ def log_evals(ckpt_path: str, step: int, t_train, tokens, model, optimizer, loss
     # save checkpoint with losses
     save_checkpoint(model, optimizer, n_iter, loss_step, final_v_loss, ckpt_path, config)
     
-    # add results to my writer
-    writer.add_text(
-        "summary/final_valid_metrics",
-        f"Train loss = {final_t_loss:.4f} | Valid loss = {final_v_loss:.4f} | "
-        f"Train perplexity = {final_t_perp:.4f} | Valid perplexity = {final_v_perp:.4f} | "
-        f"Num of samples = {valid_total:,} | "
-        f"Train time = {perf_counter() - t_train:.2f}s | Eval time = {perf_counter() - t_eval:.2f}s",
-        step+1
-    )
+    # return summary
+    s_loss = f"Train loss = {final_t_loss:.4f} | Valid loss = {final_v_loss:.4f}"
+    s_perp = f"Train perplexity = {final_t_perp:.4f} | Valid perplexity = {final_v_perp:.4f}"
+    s_time = f"Train time = {perf_counter() - t_train:.2f}s | Eval time = {perf_counter() - t_eval:.2f}s"
+    return f"{s_loss} | {s_perp} | Num of samples = {valid_total:,} | {s_time}"
+    
 
 
 def get_short_gpu_name(gpu_id=0):
@@ -341,6 +338,9 @@ def parse_config(config, mode: str = "train"):
         "num_layers": num_layers,
         "theta": config["model"]["rope_theta"],
         "context_length": cntx,
+        "init_type": config["model"]["inits"]["type_ff"],
+        "std_emb": config["model"]["inits"]["std_emb"],
+        "clip_w": config["model"]["inits"]["clip_w"],
         "vocab_size": config["model"]["vocab_size"],
         "norms": config["model"]["norms"],
         "weights_tying": config["model"]["weights_tying"],
@@ -406,9 +406,21 @@ def parse_config(config, mode: str = "train"):
         loss_eval = "init" if model_path is None else '{}'
         abl_str = f"z_{clean(config["train"]["z_alpha"])}"
         run_name = f"{dataset_name}/{abl_str}/{device_name}/exp_bs_{bs}_step_bs_{os_bs}/loss_{loss_eval}/{sched_str}/{optim_str}/{model_str}/{ts_str}"
-
+        
+        logger_name = config["logger"]
+        assert logger_name in {"wandb", "tensorboard"}, f"Logger can be: 'wandb', and 'tensorboard'; but provided {logger_name}"
 
         serialize_freq = min(config["serialize"]["frequency"] // config["validate"]["frequency"], 1) * config["validate"]["frequency"]
+        if config["model"]["dtype_amp"] == "bfloat16" and torch.cuda.is_bf16_supported():
+            autocast_dtype = torch.bfloat16
+        else:
+            autocast_dtype = torch.float16
+            if config["model"]["dtype_amp"] == "bfloat16":
+                config["model"]["dtype_amp"] == "bf16_notsup"
+
+
+        autocast_dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
+
         run_params = {
             "steps": steps,
             "batch_size": bs,
@@ -422,7 +434,10 @@ def parse_config(config, mode: str = "train"):
             "run_name": run_name,
             "device": device,
             "loader_mode": config["train"]["loader_mode"],
-            "z_alpha": config["train"]["z_alpha"]
+            "z_alpha": config["train"]["z_alpha"],
+            "logger_name": logger_name,
+            "autocast_dtype": autocast_dtype,
+            "device_name": device_name
         }
         return model_params, model_path, optimizer_params, scheduler_params, clip_grad_params, tokens_params, run_params
     if mode == "generate":

@@ -16,3 +16,4 @@ dependencies:
   - tensorboard=2.19.0
   - pip:
       - torch==2.7.0+cu128
+      - wandb
