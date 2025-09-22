@@ -20,6 +20,6 @@ dependencies:
   - cython #=3.0.*
   - setuptools #=72.*
   - pip:
-      - torch==2.7.0+cu128
+      - torch==2.8.0
       - py-spy
       - wandb
