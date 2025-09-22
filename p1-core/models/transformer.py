@@ -50,9 +50,13 @@ class TransformerBlock(nn.Module):
 
     def forward(self, x: torch.Tensor):
         # apply the first block (Multi Head Self Attention)
-        y = self.res_ln1(x + self.aft_ln1(self.attn(self.bef_ln1(x))))
+        attn = self.attn(self.bef_ln1(x))
+        res = x + self.aft_ln1(attn)
+        y = self.res_ln1(res)
         # apply the first block (Feed Forward)
-        return self.res_ln2(y + self.aft_ln2(self.ffn(self.bef_ln2(y))))
+        ff = self.ffn(self.bef_ln2(y))
+        res_ff = y + self.aft_ln2(ff)
+        return self.res_ln2(res_ff)
     
 class TransformerLM(nn.Module):
     """
@@ -64,8 +68,8 @@ class TransformerLM(nn.Module):
     """
     def __init__(
         self, d_model: int, d_ff: int, num_heads: int, activation: str, is_gate: bool, num_layers:int = 6, theta: float = 10000.0, 
-        context_length = 256, init_type: str = 'xavier', std_emb: float = 0.02, clip_w: float = 3.0, vocab_size: int = 10_000, norms: dict | None = None,
-        weights_tying: bool = False, device: torch.device | None = None, dtype: torch.dtype | None = None
+        context_length = 256, init_type: str = 'xavier', std_emb: float = 0.02, clip_w: float = 3.0, vocab_size: int = 10_000,
+        norms: dict | None = None, weights_tying: bool = False, device: torch.device | None = None, dtype: torch.dtype | None = None
         ):
         super().__init__()
         assert norms.get("final", None) in {"RMSNorm", "LayerNorm", None}

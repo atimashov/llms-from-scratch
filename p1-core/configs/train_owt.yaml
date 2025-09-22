@@ -15,7 +15,7 @@ model:
   num_layers: 12 # 4
   num_heads: 16 # 16 # 17M non-embedding parameters
   dtype: 'amp'
-  dtype_amp: 'bfloat16'
+  dtype_amp: 'float16'
   inits:
     type_ff: 'xavier'
     std_emb: 0.02
@@ -49,6 +49,7 @@ optimizer:
     max_norm: 1.0
 train:
   total_tokens_processed: 327_680_000 # 655_360_000 #  1_638_400_000 # 1_228_800_000 # 409_600_000 # 819_200_000 #   983_040_000  batch_size x step_count x context_length
+  total_flops: Null # 4 * 10**16
   batch_size: 64
   optim_step_batch_size: 64 # 2560 # 1280
   loader_mode: 'in_memory_ids' # 'sample' # ,
@@ -61,8 +62,10 @@ validate:
 serialize: # and heavy_eval
   path: "weights"
   steps: 1000
-  min_steps: 50
-  near_end_threshold: 5000
+  near_end:
+    threshold: 5000
+    steps: 50
+    max_steps: 500
   num_samples: 1280
   frequency: 0.1 # assumed that we don't have gradient accumulation
   postfix: ""

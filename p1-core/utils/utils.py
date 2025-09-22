@@ -5,6 +5,7 @@ import numpy as np
 import numpy.typing as npt
 from numpy import random
 import math
+import yaml
 from typing import Iterable
 from time import perf_counter
 from datetime import datetime
@@ -14,6 +15,7 @@ from optimizers import Adam, Adan, Lion
 from termcolor import colored
 from contextlib import nullcontext
 from torch.amp import autocast
+import wandb
 
 def softmax(x: torch.Tensor, dim: int, tau: float = 1.0) -> torch.Tensor:
     assert -x.dim() <= dim < x.dim(), "Dimension is wrong"
@@ -158,7 +160,7 @@ def data_loading(x: npt.NDArray, context_length: int, start_seqs: np.ndarray, de
     tokens_next = torch.from_numpy(tokens_next_np).to(device = device, dtype = torch.int)
     return tokens_curr, tokens_next
 
-def save_checkpoint(model, optimizer, iteration, loss_step, loss_full, out_path, config = None):
+def save_checkpoint(model, optimizer, iteration, loss_step, loss_full, out_path, config: dict | None = None):
     model_cpu_state = {k: v.detach().cpu() for k, v in model.state_dict().items()}
     obj = {
         "model": model_cpu_state,
@@ -167,10 +169,14 @@ def save_checkpoint(model, optimizer, iteration, loss_step, loss_full, out_path,
         "loss_step": loss_step,
         "loss_full": loss_full,
     }
-    if config is not None:
-        obj["config"] = config
     out_path.parent.mkdir(parents=True, exist_ok=True)
     torch.save(obj, out_path)
+    
+    # save config(including model params)
+    if config is not None:
+        config_path = out_path.parent / "config.yaml"
+        with open(config_path, "w") as f:
+            yaml.dump(config, f)
 
 def load_checkpoint(src, model, optimizer, device = "cpu"):
     obj = torch.load(src, map_location = device)
@@ -178,7 +184,7 @@ def load_checkpoint(src, model, optimizer, device = "cpu"):
     model.load_state_dict(obj["model"])
     if optimizer:
         optimizer.load_state_dict(obj["optimizer"])
-    return obj["iter_number"], obj.get("loss_step", None), obj.get("loss_full", None), obj.get("config", None)
+    return obj["iter_number"], obj.get("loss_step", None), obj.get("loss_full", None)
 
 
 def eval_batch(x: npt.NDArray, model, loss_fn, context_length: int, batch_size: int, device):
@@ -244,7 +250,7 @@ def log_evals(ckpt_path: str, step: int, t_train, tokens, model, optimizer, loss
     # load model to evaluate
     if not ckpt_path.exists():
         save_checkpoint(model, optimizer, -1, -1, -1, ckpt_path, config)
-    n_iter, loss_step, _, _ = load_checkpoint(ckpt_path, model, None, device)
+    n_iter, loss_step, _ = load_checkpoint(ckpt_path, model, None, device)
 
     # calculate evals
     final_t_loss = eval(step, tokens["train"], model, loss_fn, context_length, batch_size, valid_total, device, train_data = True, use_amp = use_amp)
@@ -256,10 +262,16 @@ def log_evals(ckpt_path: str, step: int, t_train, tokens, model, optimizer, loss
     save_checkpoint(model, optimizer, n_iter, loss_step, final_v_loss, ckpt_path, config)
     
     # return summary
+    os_bs = config["train"]["optim_step_batch_size"]
+    flops_per_token = est_forward_flops(config)
+    total_flops = (step + 1) * os_bs * context_length * flops_per_token
     s_loss = f"Train loss = {final_t_loss:.4f} | Valid loss = {final_v_loss:.4f}"
-    s_perp = f"Train perplexity = {final_t_perp:.4f} | Valid perplexity = {final_v_perp:.4f}"
-    s_time = f"Train time = {perf_counter() - t_train:.2f}s | Eval time = {perf_counter() - t_eval:.2f}s"
-    return f"{s_loss} | {s_perp} | Num of samples = {valid_total:,} | {s_time}"
+    s_perp = f"Train perplexity = {final_t_perp:.4f} | Valid perplexity = {final_v_perp:.4f}"    
+    elapsed_t, elapsed_v = perf_counter() - t_train, perf_counter() - t_eval
+    min_t, min_v = int(elapsed_t // 60), int(elapsed_v // 60)
+    sec_t, sec_v = int(elapsed_t % 60), int(elapsed_v % 60)
+    s_time = f"Train time = {min_t} min. {sec_t} sec. | Eval time = {min_v} min. {sec_v} sec."
+    return f"Total FlOPS = {total_flops:.2e} | {s_loss} | {s_perp} | Num of samples = {valid_total:,} | {s_time}"
     
 
 
@@ -338,12 +350,12 @@ def parse_config(config, mode: str = "train"):
         "num_layers": num_layers,
         "theta": config["model"]["rope_theta"],
         "context_length": cntx,
-        "init_type": config["model"]["inits"]["type_ff"],
-        "std_emb": config["model"]["inits"]["std_emb"],
-        "clip_w": config["model"]["inits"]["clip_w"],
+        "init_type": config["model"].get("inits", {}).get("type_ff"),
+        "std_emb": config["model"].get("inits", {}).get("std_emb"),
+        "clip_w": config["model"].get("inits", {}).get("clip_w"),
         "vocab_size": config["model"]["vocab_size"],
         "norms": config["model"]["norms"],
-        "weights_tying": config["model"]["weights_tying"],
+        "weights_tying": config["model"].get("weights_tying", False),
         "device": device,
         "dtype": dtype_map[config["model"]["dtype"]]
     }
@@ -353,7 +365,16 @@ def parse_config(config, mode: str = "train"):
         assert "optim_step_batch_size" not in config["train"] or config["train"]["optim_step_batch_size"] % config["train"]["batch_size"] == 0, "'optim step batch size' should be divisible by 'batch size'"
         bs = config["train"]["batch_size"]
         os_bs = config["train"].get("optim_step_batch_size", config["train"]["batch_size"])
-        steps = (config["train"]["total_tokens_processed"] + os_bs * cntx - 1) // (os_bs * cntx)
+        
+        # start from total FLOPS or total tokens
+        flops_per_token = est_forward_flops(config)
+        if config["train"]["total_flops"] is not None:
+            steps =  int(config["train"]["total_flops"] / (flops_per_token * os_bs * cntx))
+            config["train"]["total_tokens_processed"] = steps * os_bs * cntx
+        else:
+            steps = (config["train"]["total_tokens_processed"] + os_bs * cntx - 1) // (os_bs * cntx)
+            config["train"]["total_flops"] = steps * os_bs * cntx * flops_per_token
+
         lr_max, lr_min = float(config["optimizer"]["lr"]), float(config["optimizer"]["scheduler"]["lr_min"])
         warmup_iters = config["optimizer"]["scheduler"]["warmup_iters"]
         flat_iters = warmup_iters + int(config["optimizer"]["scheduler"]["flat_iters"] * steps)
@@ -394,7 +415,7 @@ def parse_config(config, mode: str = "train"):
         compile_str = "_cmpl" if config["train"]["compile"] else ""
         weights_tying_str = "_wt" if config["model"]["weights_tying"] else ""
         postfix = "" if config["serialize"]["postfix"] == "" else f"_{config["serialize"]["postfix"]}"
-        model_str = f"cntx_{cntx}_numlayers_{num_layers}_dmodel_{d_model}_dff_{d_ff}_numheads_{num_heads}{rope_str}_{activation_str}_{dtype_str}{compile_str}{weights_tying_str}{postfix}"
+        model_str = f"cntx_{cntx}_numlayers_{num_layers}_dmodel_{d_model}_dff_{d_ff}_numheads_{num_heads}{rope_str}_{activation_str}_{dtype_str}{compile_str}{weights_tying_str}"
         sched_name = config["optimizer"]["scheduler"]["name"]
         sched_str = f"{sched_name}/steps_{steps}/warmup_{warmup_iters}"
         optim_suffix = "_tr" if config["optimizer"]["is_trust_ratio"] else ""
@@ -405,10 +426,15 @@ def parse_config(config, mode: str = "train"):
         ts_str = datetime.now().strftime('%Y%m%d_%H%M%S')
         loss_eval = "init" if model_path is None else '{}'
         abl_str = f"z_{clean(config["train"]["z_alpha"])}"
-        run_name = f"{dataset_name}/{abl_str}/{device_name}/exp_bs_{bs}_step_bs_{os_bs}/loss_{loss_eval}/{sched_str}/{optim_str}/{model_str}/{ts_str}"
         
         logger_name = config["logger"]
-        assert logger_name in {"wandb", "tensorboard"}, f"Logger can be: 'wandb', and 'tensorboard'; but provided {logger_name}"
+        assert logger_name in {"wandb", "tensorboard", None}, f"Logger can be: 'wandb', 'tensorboard', and 'None'; but provided {logger_name}"
+
+        if logger_name == "wandb":
+            run_name = f"{dataset_name}/wandb/{ts_str}{postfix}"
+        else:
+            run_name = f"{dataset_name}/{abl_str}/{device_name}/exp_bs_{bs}_step_bs_{os_bs}/loss_{loss_eval}/{sched_str}/{optim_str}/{model_str}{postfix}/"
+        
 
         serialize_freq = min(config["serialize"]["frequency"] // config["validate"]["frequency"], 1) * config["validate"]["frequency"]
         if config["model"]["dtype_amp"] == "bfloat16" and torch.cuda.is_bf16_supported():
@@ -417,9 +443,6 @@ def parse_config(config, mode: str = "train"):
             autocast_dtype = torch.float16
             if config["model"]["dtype_amp"] == "bfloat16":
                 config["model"]["dtype_amp"] == "bf16_notsup"
-
-
-        autocast_dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
 
         run_params = {
             "steps": steps,
@@ -437,7 +460,7 @@ def parse_config(config, mode: str = "train"):
             "z_alpha": config["train"]["z_alpha"],
             "logger_name": logger_name,
             "autocast_dtype": autocast_dtype,
-            "device_name": device_name
+            "device_name": device_name,
         }
         return model_params, model_path, optimizer_params, scheduler_params, clip_grad_params, tokens_params, run_params
     if mode == "generate":
@@ -699,3 +722,21 @@ def est_forward_flops(config):
     flops_proj = 2 * B * S * d_model * V
     
     return (L * (flops_attn + flops_ff) + flops_proj) // (B * S)
+
+def log_stats(log_data: dict, step: int, logger: str, writer):
+    if logger == "wandb":
+        wandb.log(log_data, step=step)
+    elif logger == "tensorboard":
+        assert writer is not None, "TensorBoard logger requires a writer instance."
+        for k, v in log_data.items():
+            writer.add_scalar(k, v, step)
+
+def add_gpu_stats(log_data: dict, config: dict, name: str):
+    used_mem = torch.cuda.memory_allocated(device=config["device"]) / (1024 ** 3)
+    reserved_mem = torch.cuda.memory_reserved(device=config["device"]) / (1024 ** 3)
+    max_used = torch.cuda.max_memory_allocated(device=config["device"]) / (1024 ** 3)
+    max_reserved = torch.cuda.max_memory_reserved(device=config["device"]) / (1024 ** 3)
+    log_data[f"perf_systems/gpu_mem_{name}/allocated_GB"] = used_mem
+    log_data[f"perf_systems/gpu_mem_{name}/reserved_GB"] = reserved_mem
+    log_data[f"perf_systems/gpu_mem_{name}/allocated_max_GB"] = max_used
+    log_data[f"perf_systems/gpu_mem_{name}/reserved_max_GB"] =  max_reserved

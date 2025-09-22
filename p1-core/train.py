@@ -32,7 +32,8 @@ def train_loop(model, optimizer, tokens, loss_fn, scheduler_params, max_norm, ru
     heavy_valid_total = config["serialize"]["num_samples"]
     serialize_path = run_params["serialize_path"]
     serialize_min_steps = config["serialize"]["steps"]
-    near_end_threshold = config["serialize"]["near_end_threshold"]
+    serialize_max_steps = float('inf')
+    near_end_threshold = config["serialize"]["near_end"]["threshold"]
     serialize_every = max(1, int(1 / run_params["serialize_freq"] * batch_size / os_bs))  
     run_name = run_params["run_name"]
     device = run_params["device"]
@@ -57,9 +58,7 @@ def train_loop(model, optimizer, tokens, loss_fn, scheduler_params, max_norm, ru
     if not debug:
         if logger_name == "wandb":
             wandb.init(project = "llms-from-scratch", name = run_name, config = config)
-        else:
-            writer = SummaryWriter(log_dir=f"runs/{run_name}")
-        
+        writer = SummaryWriter(log_dir=f"runs/{run_name}") if logger_name == "tensorboard" else None
         ckpt_path = Path(serialize_path) / run_name / "ckpt_best.pt"
         ckpt_path.parent.mkdir(parents=True, exist_ok=True)
     
@@ -71,8 +70,17 @@ def train_loop(model, optimizer, tokens, loss_fn, scheduler_params, max_norm, ru
     t_train = perf_counter()
     scaler = GradScaler('cuda') if is_amp else None
     heavy_val_step, heavy_vals_num = -1, 0
+    heavy_val_summary = []
     for step in loop:
         t_step = perf_counter()
+        
+        # reset max stats for GPU
+        if not debug:
+            log_data = dict()
+            if torch.cuda.is_available():
+                torch.cuda.reset_peak_memory_stats()
+                add_gpu_stats(log_data, config, "start")
+
         # update learning rate TODO: create one-line function
         scheduler_params["t"] = step + 1
         lr = cosine_lr_schedule(**scheduler_params)
@@ -81,9 +89,7 @@ def train_loop(model, optimizer, tokens, loss_fn, scheduler_params, max_norm, ru
            
         optimizer.zero_grad()
         loss_acc = 0
-        logits_norm_acc = 0.0
-        logits_max_acc = 0.0
-        logits_std_acc = 0.0
+        logits_norm_acc, logits_max_acc, logits_std_acc = 0.0, 0.0, 0.0
         accum_steps = os_bs // batch_size
         for i in range(accum_steps):
             start_seqs = get_start_seqs(step * os_bs + i * batch_size, batch_size, tokens["train"].shape[0] - context_length, im_ids, loader_mode)
@@ -108,51 +114,46 @@ def train_loop(model, optimizer, tokens, loss_fn, scheduler_params, max_norm, ru
                 logits_max_acc  += logits.amax(dim=-1).mean().item() / accum_steps
                 logits_std_acc  += logits.std().item() / accum_steps
 
-        if loss_acc < min_train_loss:
-            min_train_loss = loss_acc
-            # Reduce interval between heavy evaluations near the end
-            if steps - (step + 1) <= near_end_threshold:
-                serialize_min_steps = config["serialize"]["min_steps"]
+        # add memory statistics
+        if not debug and torch.cuda.is_available():
+            add_gpu_stats(log_data, config, "pass")
+
+
+        # Reduce interval between heavy evaluations near the end
+        if steps - (step + 1) <= near_end_threshold:
+            serialize_min_steps = config["serialize"]["near_end"]["steps"]
+            serialize_max_steps = config["serialize"]["near_end"]["max_steps"]
+        
+        if loss_acc < min_train_loss or step - heavy_val_step >= serialize_max_steps or step == steps - 1:
+            min_train_loss = min(loss_acc, min_train_loss)
+
             # Check if we should run heavy eval
-            if not debug and step - heavy_val_step >= serialize_min_steps:
+            if not debug and (step - heavy_val_step >= serialize_min_steps or step == steps - 1):
                 heavy_val_loss = eval(step, tokens["valid"], model, loss_fn, context_length, batch_size, heavy_valid_total, device, False, use_amp = is_amp)
                 heavy_vals_num += 1
+                heavy_val_summary.append(f"Step {step:,}: ❌")
                 if  heavy_val_loss < min_valid_loss:
                     min_valid_loss = heavy_val_loss
                     save_checkpoint(model, optimizer, step, min_valid_loss, -1, ckpt_path, config)
                     heavy_val_step = step
+                    heavy_val_summary[-1] = f"Step {step:,}: ✅"
+                if step - heavy_val_step >= serialize_max_steps:
+                    heavy_val_step = step
 
         # log train params to tensorboard
         if not debug:
-            if logger_name == "wandb":
-                wandb.log({
-                    "lr": optimizer.param_groups[0]['lr'],
-                    "train/loss": loss_acc,
-                    "train/perplexity": float('inf') if loss_acc > 20 else np.exp(loss_acc),
-                    "train/logits_norm": logits_norm_acc,
-                    "train/logits_max": logits_max_acc,
-                    "train/logits_std": logits_std_acc,
-                }, step=step)
-            else:
-                writer.add_scalar("lr", optimizer.param_groups[0]['lr'], step)
-                writer.add_scalar("train/loss", loss_acc, step)
-                writer.add_scalar("train/perplexity", float('inf') if loss_acc > 20 else np.exp(loss_acc), step)
-                writer.add_scalar("train/logits_norm", logits_norm_acc, step)
-                writer.add_scalar("train/logits_max", logits_max_acc, step)
-                writer.add_scalar("train/logits_std", logits_std_acc, step)
-            
+            log_data["perf/lr"] = optimizer.param_groups[0]['lr']
+            log_data["perf/train_loss"] = loss_acc
+            log_data["perf/train_perplexity"] = float('inf') if loss_acc > 20 else np.exp(loss_acc)
+            log_data["debug/logits_norm"] = logits_norm_acc
+            log_data["debug/logits_max"] = logits_max_acc
+            log_data["debug/logits_std"] = logits_std_acc
 
             # log validate params and log in tensorboard
             if step % valid_every == 0:
                 valid_loss = eval_batch(tokens["valid"], model, loss_fn, context_length, batch_size, device)
-                if logger_name == "wandb":
-                    wandb.log({
-                        "valid/loss": valid_loss,
-                        "valid/perplexity": float('inf') if valid_loss > 20 else np.exp(valid_loss),
-                    }, step=step)
-                else:
-                    writer.add_scalar("valid/loss", valid_loss, step)
-                    writer.add_scalar("valid/perplexity", float('inf') if valid_loss > 20 else np.exp(valid_loss), step)
+                log_data["perf/valid_loss"] = valid_loss
+                log_data["perf/valid_perplexity"] = float('inf') if valid_loss > 20 else np.exp(valid_loss)
 
         # clip gradients
         if max_norm is not None:
@@ -164,14 +165,9 @@ def train_loop(model, optimizer, tokens, loss_fn, scheduler_params, max_norm, ru
             g_norm_post = None
         if not debug:
             if logger_name == "wandb":
-                log_data = {"train/grad_norm/pre_clip": g_norm_pre}
+                log_data["debug/grad_norm_pre_clip"] = g_norm_pre
                 if g_norm_post is not None:
-                    log_data["train/grad_norm/post_clip"] = g_norm_post
-                wandb.log(log_data, step=step)
-            else:
-                writer.add_scalar("train/grad_norm/pre_clip", g_norm_pre, step)
-                if g_norm_post is not None:
-                    writer.add_scalar("train/grad_norm/post_clip", g_norm_post, step)
+                    log_data["debug/grag_norm_post_clip"] = g_norm_post
             
         if is_amp: # NOTE: it will not work with Lion_tr
             scaler.step(optimizer)
@@ -187,23 +183,24 @@ def train_loop(model, optimizer, tokens, loss_fn, scheduler_params, max_norm, ru
             # log 'tokens per second'
             tokens_per_sec = os_bs * context_length / (perf_counter() - t_step)
             flops_per_sec = flops_per_token * os_bs * context_length / (perf_counter() - t_step)
-            if logger_name == "wandb":
-                wandb.log({
-                    "train/tokens_per_sec": tokens_per_sec,
-                    "train/forward_flops_per_sec": flops_per_sec,
-                }, step=step)
-            else:
-                writer.add_scalar("train/tokens_per_sec", tokens_per_sec, step)
-                writer.add_scalar("train/forward_flops_per_sec", flops_per_sec, step)
+            log_data["perf_systems/tokens_per_sec"] = tokens_per_sec
+            log_data["perf_systems/forward_flops_per_sec"] =  flops_per_sec
 
+            # add memory statistics
+            if torch.cuda.is_available():
+                add_gpu_stats(log_data, config, "optim")       
+                
         # run eval of large subset of train and valid datasets if asked
         if not debug and step + 1 in eval_steps and step + 1 != steps:
             summary = log_evals(ckpt_path, step, t_train, tokens, model, optimizer, loss_fn, config, use_amp = is_amp)
             if logger_name == "wandb":
-                wandb.run.summary[f"summary_at_step_{step + 1}"] = summary
+                wandb.run.summary[f"summary_at_step_{step+1}"] = summary
             else:
                 writer.add_text("summary/final_valid_metrics", summary, step+1)
 
+        # log stats
+        if not debug:
+            log_stats(log_data, step, logger_name, writer)
         # update progress bar
         loop.set_postfix(
             lr=f"{lr:.2e}", 
@@ -216,11 +213,14 @@ def train_loop(model, optimizer, tokens, loss_fn, scheduler_params, max_norm, ru
     # run the best model on the large subsets of train and valid set
     if not debug:
         summary = log_evals(ckpt_path, step, t_train, tokens, model, optimizer, loss_fn, config, use_amp = is_amp)
+        heavy_val_summary_str = "\n".join(heavy_val_summary)
         if logger_name == "wandb":
                 wandb.run.summary[f"summary_at_step_{step + 1}"] = summary
+                wandb.run.summary["validation_checkpoints"] = heavy_val_summary_str
                 wandb.finish()
         else:
             writer.add_text("summary/final_valid_metrics", summary, step+1)
+            writer.add_text("summary/validation_checkpoints", heavy_val_summary_str, step + 1)
             writer.close()            
 
 def main(config, random_seed = 123):
@@ -268,7 +268,7 @@ def main(config, random_seed = 123):
     # get experiments
     model = TransformerLM(**model_params).to(model_params["device"]) # NOTE: I sent to device explicitely. Not sure if it makes sense.
     if ckpt_path:
-        n_iter, loss_step, loss_full, _ = load_checkpoint(ckpt_path, model, None, model_params["device"])
+        n_iter, loss_step, loss_full = load_checkpoint(ckpt_path, model, None, model_params["device"])
         run_params["run_name"] = run_params["run_name"].format(f"{loss_full:.4f}" if loss_full else "unkn")
     optimizer_params["params"] = model.parameters()
     optimizer = get_optim(config["optimizer"]["name"], optimizer_params)
@@ -276,8 +276,11 @@ def main(config, random_seed = 123):
         "train": np.load(tokens_params["train"], mmap_mode='r'),
         "valid": np.load(tokens_params["valid"], mmap_mode='r')
     }
-    # details of the model
+   
+    # add ratio total_tokens to params number
     cnt_params = count_parameters(model)
+    config["train"]["tokens_model_ratio"] = total_tokens / cnt_params
+     # details of the model
     print(
         f"{colored("Model parameters: ", 'blue')}{cnt_params:,} | "
         f"{colored('num_layers=', 'blue')}{model_params["num_layers"]:,} | "
@@ -322,8 +325,9 @@ if __name__ == '__main__':
     config["serialize"]["postfix"] = "winit2e-2_xav"
 
     def update_config(config, mode = 'baseline'):
-        if mode == 'test':
+        if mode == 'test1': # Adamw
             config["train"]["batch_size"] = 32 # NOTE: only for RTX5090
+            config["train"]["optim_step_batch_size"] = 64
             config["model"]["context_length"] = 352
             config["model"]["d_model"] = 1024
             config["model"]["d_ff"] = 2688
@@ -340,11 +344,25 @@ if __name__ == '__main__':
             config["optimizer"]["lr"] = 5e-3
             config["optimizer"]["beta1"] = 0.9
             config["optimizer"]["beta2"] = 0.98
-    
             config["optimizer"]["scheduler"]["lr_min"] = 3e-5
-            config["optimizer"]["scheduler"]["warmup_iters"] = 2000
+            config["optimizer"]["scheduler"]["warmup_iters"] = 500 # 1000 # 2000
             config["optimizer"]["scheduler"]["cosine_cycle_iters"] = 1.0
-        
+            return config
+        config["train"]["batch_size"] = 32 if mode == "test5" else 64
+        config["train"]["optim_step_batch_size"] = 64
+        config["model"]["context_length"] = 352 if mode == "test5" else 256
+        config["optimizer"]["name"] = 'Lion'
+        config["optimizer"]["lr"] = 1e-4
+        config["optimizer"]["beta1"] = 0.92
+        config["optimizer"]["beta2"] = 0.92
+        config["optimizer"]["scheduler"]["lr_min"] = 1e-5
+        config["model"]["norms"]['after'] = 'RMSNorm'
+        config["model"]["num_layers"] = 12
+
+        config["model"]["weights_tying"] = mode == 'test2'
+        config['model']['inits']['std_emb'] = 0.02 if config["model"]["weights_tying"] else 1.0
+        config["model"]["d_model"] = 1024 if mode == "test4" else 768
+        config["model"]["d_ff"] =  2688 if mode == "test4" else 2016
         return config
 
 
@@ -354,11 +372,20 @@ if __name__ == '__main__':
     # config["train"]["total_tokens_processed"] = steps * config["train"]["optim_step_batch_size"] * config["model"]["context_length"]
     # config["optimizer"]["scheduler"]["warmup_iters"] = min(max(50, int(0.05 * steps)), 100)
 
-    # config["device"] = 1
-    # config = update_config(config, 'test')
-    config["train"]["total_tokens_processed"] //= 2
-    for init_type in ["xavier", "lecun"]:
-        config["model"]["inits"]["type_ff"] = init_type    
-        for std in [1.0, 0.02]:
-            config["model"]["inits"]["std_emb"] = std
-            main(config, seed)
+    config["device"] = 1
+    # config["train"]["loader_mode"] = "sample"
+    config["train"]["batch_size"] = 32
+    config["train"]["total_flops"] = 6 * 10**17
+    config["validate"]["eval_steps"] =  {0.2, 0.4, 0.6, 0.8}
+    config["serialize"]["postfix"] = "sunday"
+    
+    for mode in ["test3"]:
+    # for mode in ["test4", "test", "test5"]:
+        t_step = perf_counter()
+        config = update_config(config, mode)
+        main(config, seed)
+
+        elapsed_seconds = perf_counter() - t_step
+        minutes = int(elapsed_seconds // 60)
+        seconds = int(elapsed_seconds % 60)
+        print(colored(f"⏱️ Took {minutes} min {seconds} sec.", 'red', attrs=["bold"]))
