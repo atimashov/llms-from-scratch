@@ -1,3 +1,9 @@
-# TODO: split utils on more meaningful parts
-from .utils import *
+from .checkpointing import *
+from .config_parser import *
+from .data import *
+from .evals import *
+from .logging import *
+from .losses import *
+from .misc import *
+from .model_stats import *
 from .profiling import *

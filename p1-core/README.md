@@ -16,7 +16,7 @@ Evyrything else - from tokenization to attention and optimization — is **custo
 
 ## ⚙️ Setup 
 ### 1. Download the dataset (CS336 based)
-Run from the root of the project (e.g. `NATURAL_LANGUAGE_PROCESSING`):
+Run from the root of the project (e.g. `llms-from-scratch`):
 
 ```sh
 cd ..
@@ -45,7 +45,7 @@ gunzip owt_valid.txt.gz
 Return to the repo root:
 ```sh
 cd ..
-cd ../NATURAL_LANGUAGE_PROCESSING
+cd ../llms-from-scratch/p1-core
 ```
 
 
@@ -60,15 +60,16 @@ conda activate llms
 ### 1. Run BPE tokenizer test
 ``` sh
 cd llm_core
-python run_tokenizer.py --use-case save_tokens --dataset-name TinyStoriesV2-GPT4 --file-tokenize train.txt
+python run_tokenizer.py --use-case save_tokens --dataset-name OpenWebText --file-tokenize train.txt # TinyStoriesV2-GPT4
 ```
 💡 Use `--num-processes` carefully based on your system’s RAM and CPU cores.
 
 ### 2. Train LLM
 ``` sh
-python train.py --config config.yaml
+cd p1-core
+python train.py --config configs/train_owt.yaml
 ```
-⚠️ Double-check your `config.yaml` for the correct device, context_length, and dataset path.
+⚠️ Double-check your `train_owt.yaml` for the correct device, context_length, and dataset path.
 
 ## Experiments
 Coming soon.

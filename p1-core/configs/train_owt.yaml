@@ -1,34 +1,30 @@
 seed: 123
 dataset_path:
   prefix: '~/ai_projects/data/OpenWebText'
-  # raw_data: 'raw_data'
   tokenized: 'tokenized'
 device: 0 # currently no distributed training
 model:
   vocab_size: 32_000
   context_length: 256 # 256 # 512
-  d_model:  1024 # 512 # 768 #    (dimensions used in many small Transformer papers)
+  d_model:  1024 # 512   # ( 768 is a dimension used in many small Transformer papers)
   d_ff:  2688 # 1344 # 2016 # 3072 # 6144   ~8/3 d_model; 64x, which is good for GPU performance.
   activation: "SiLU"
-  is_gate: True
+  is_gate: true
   rope_theta: 10_000
   num_layers: 12 # 4
   num_heads: 16 # 16 # 17M non-embedding parameters
   dtype: 'amp'
-  dtype_amp: 'float16'
+  mixed_precision_dtype: 'float16'
   inits:
     type_ff: 'xavier'
     std_emb: 0.02
     clip_w: 3.0
-  norms: # can be either 'RMSNorm', 'LayerNorm', None
+  norms: # can be either 'RMSNorm', 'LayerNorm', null
     before: 'RMSNorm'
     after: 'RMSNorm'
     residual: Null
     final: 'RMSNorm'
-  weights_tying: True
-  # load_prefix: "~/ai_projects/Natural_Language_Processing/p2_transformers/weights/TinyStoriesV2-GPT4/RTX5090"
-  # load_name: "exp_bs_64_step_bs_64/loss_init/cosine/steps_40000/warmup_2000/Lion/lrmax5e-4_lrmin5e-5_wdecay5e-4/dmodel_512_dff_1344_numlayers_4_numheads_16_cntx_256/20250830_203010/ckpt_best.pt"
-  # load_name: "exp_bs_64_step_bs_64/loss_init/cosine/steps_40000/warmup_2000/Lion_tr/lrmax3e-3_lrmin3e-4_wdecay5e-4/dmodel_512_dff_1344_numlayers_4_numheads_16_cntx_256/20250830_203128/ckpt_best.pt"
+  weights_tying: true
 optimizer:
   name:  'Lion' # 'AdamW' # 'Lion' #
   lr: 1e-4
@@ -37,37 +33,43 @@ optimizer:
   beta3: 0.99
   epsilon: 1e-8
   weight_decay: 0.1
-  nesterov: False
-  is_trust_ratio: False
-  scheduler:
-    name: cosine
-    lr_min: 5e-6
-    warmup_iters: 100 # 0.03
-    flat_iters: 0
-    cosine_cycle_iters: 1.0
+  nesterov: false
+  is_trust_ratio: false
   clip_gradient:
     max_norm: 1.0
+scheduler:
+  name: 'cosine'
+  lr_min: 5e-6
+  warmup_iters: 100 # 0.03
+  flat_iters: 0
+  cosine_cycle_iters: 1.0
+loss:
+  name: 'cross_entropy'
+  z_alpha: 1e-4
 train:
   total_tokens_processed: 327_680_000 # 655_360_000 #  1_638_400_000 # 1_228_800_000 # 409_600_000 # 819_200_000 #   983_040_000  batch_size x step_count x context_length
-  total_flops: Null # 4 * 10**16
+  total_flops: 2e16 # null # 4 * 10**16
   batch_size: 64
   optim_step_batch_size: 64 # 2560 # 1280
   loader_mode: 'in_memory_ids' # 'sample' # ,
-  z_alpha: 1e-4
-  compile: True
+  compile: true
+  # ckpt_load_from: 'checkpoints/OpenWebText/wandb/20250921_200000_sunday/ckpt_best.pt'
+  resume_training: false  # true: resume optimizer etc., false: warm-start weights only
 validate:
-  frequency: 0.1 # assumed that we don't have gradient accumulation
-  eval_steps: {0.25, 0.5, 0.75}
-  num_samples: 32_000 # '-1' means the full validation set
-serialize: # and heavy_eval
-  path: "weights"
-  steps: 1000
-  near_end:
-    threshold: 5000
-    steps: 50
-    max_steps: 500
-  num_samples: 1280
-  frequency: 0.1 # assumed that we don't have gradient accumulation
+  monitor:
+    frequency: 0.1
+  checkpoint:
+    min_interval_steps: 1000    # At least this many steps between checkpoints
+    num_samples: 1280
+    near_end:
+      threshold: 5000           # Switch to more frequent checking near end
+      min_steps: 50
+      max_steps: 500
+  report:
+    steps_ratio: {0.25, 0.5, 0.75}
+    num_samples: 32000
+serialize:
+  path: "checkpoints"
   postfix: ""
-debug: False
+debug: false
 logger: 'wandb'
