@@ -47,7 +47,7 @@ def load_checkpoint(src, model, optimizer = None, scaler = None, device = "cpu")
         scaler.load_state_dict(obj["scaler"])
 
     # Load scheduler config if available
-    scheduler_cfg = obj.get("scheduler_cfg", None)
+    scheduler_cfg = obj.get("scheduler_params", None)
     
     return (
         obj["iter_number"],

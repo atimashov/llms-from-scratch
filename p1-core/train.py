@@ -256,7 +256,9 @@ def main(config, random_seed = 123):
 
     # get experiments
     model = TransformerLM(**model_params).to(model_params["device"]) # NOTE: I sent to device explicitely. Not sure if it makes sense.
-        
+    if config["train"]["compile"]:
+        model = torch.compile(model)
+
     optim_params["params"] = model.parameters()
     optimizer = get_optim(config["optimizer"]["name"], optim_params)
 
@@ -305,8 +307,6 @@ def main(config, random_seed = 123):
     loss_fn = get_loss_fn(config["loss"])
     
     # Run training loop
-    if config["train"]["compile"]:
-        model = torch.compile(model)
     train_loop(n_iter if resume_training else 0, model, optimizer, scaler, tokens, loss_fn, scheduler_params, max_norm, run_params, config, flops_per_token)
     print(colored("-" * 200, "cyan", attrs=["bold"]))
 
