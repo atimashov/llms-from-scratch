@@ -219,7 +219,7 @@ def main(config, random_seed = 123):
     model_params, ckpt_path_load, optim_params, scheduler_params, clip_grad_params, tokens_params, run_params = parse_config(config)
     config["device_name"] = run_params["device_name"]
     max_norm = clip_grad_params["max_norm"]
-    resume_training = run_params["resume_training"]
+    resume_training = "ckpt_load_from" in config["train"] and run_params["resume_training"]
 
     # print intro
     curr_time = datetime.now().time()
