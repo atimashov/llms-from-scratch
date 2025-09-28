@@ -56,7 +56,8 @@ class TransformerBlock(nn.Module):
         # apply the first block (Feed Forward)
         ff = self.ffn(self.bef_ln2(y))
         res_ff = y + self.aft_ln2(ff)
-        return self.res_ln2(res_ff)
+        out = self.res_ln2(res_ff)
+        return out
     
 class TransformerLM(nn.Module):
     """

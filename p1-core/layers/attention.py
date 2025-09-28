@@ -13,6 +13,7 @@ def scaled_dot_product_attention(Q: torch.Tensor, K: torch.Tensor, V: torch.Tens
     d_k = K.shape[-1]
     # seq_len is the same for both, but I distinguish the ordering
     scores = einsum(Q, K, "... seq_len_q d_k, ... seq_len_k d_k -> ... seq_len_q seq_len_k") 
+    scores = scores.clamp(min = -80, max=80.0)
     if mask is not None:
         scores = scores.masked_fill(~mask, float('-inf'))
     weights = softmax(scores / (d_k ** 0.5), dim = -1)
