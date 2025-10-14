@@ -10,7 +10,7 @@ __all__ = [
 import torch
 import numpy as np
 import math
-from optimizers import Adam, Adan, Lion
+from p1_core.optimizers import Adam, Adan, Lion
 
 def cosine_lr_schedule(t: int, lr_max: float, lr_min: float, warmup_iters: int, flat_iters: int, cosine_cycle_iters: int):
     assert warmup_iters >= 0, f"Invalid warmup iterations: {warmup_iters}"

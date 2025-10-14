@@ -24,7 +24,7 @@ class RoPE(nn.Module):
             token_positions = token_positions.to(self.sin.device)
         sin = self.sin[token_positions]
         cos = self.cos[token_positions]
-        # split x on odd and even
+        # split x into even and odd dimensions
         x1 = x[..., 0::2]
         x2 = x[..., 1::2]
         # apply rotations (it will broadcasr automatically since last 2 dims match)

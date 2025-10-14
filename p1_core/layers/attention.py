@@ -3,7 +3,7 @@ import torch
 from torch import nn
 from .pos_enc import RoPE
 from .core import Linear
-from utils import softmax
+from p1_core.utils import softmax
 
 def scaled_dot_product_attention(Q: torch.Tensor, K: torch.Tensor, V: torch.Tensor, mask: torch.Tensor | None):
     """
@@ -34,7 +34,7 @@ class MultiHeadSelfAttention(nn.Module):
         assert d_model % num_heads == 0, "d_model must be divisible by num_heads"
         self.d_model, self.num_heads = d_model, num_heads
         self.d_k, self.d_v = d_model // num_heads, d_model // num_heads
-        # init matrices
+        # init projections
         self.P_Q = Linear(d_model, num_heads * self.d_k, init_type, clip_w, device = device, dtype=dtype)
         self.P_K = Linear(d_model, num_heads * self.d_k, init_type, clip_w, device = device, dtype=dtype)
         self.P_V = Linear(d_model, num_heads * self.d_v, init_type, clip_w, device = device, dtype=dtype)

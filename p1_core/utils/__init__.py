@@ -6,4 +6,3 @@ from .logging import *
 from .losses import *
 from .misc import *
 from .model_stats import *
-from .profiling import *

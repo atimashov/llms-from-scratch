@@ -2,8 +2,8 @@ import torch
 from torch import nn
 from einops import rearrange, einsum
 
-from utils import softmax
-from layers import Embedding, Linear, RMSNorm, LayerNorm, GatedFFN, FFN, MultiHeadSelfAttention
+from p1_core.utils import softmax
+from p1_core.layers import Embedding, Linear, RMSNorm, LayerNorm, GatedFFN, FFN, MultiHeadSelfAttention
 
     
 class TransformerBlock(nn.Module):
@@ -22,19 +22,19 @@ class TransformerBlock(nn.Module):
         assert norms.get("after", None) in {"RMSNorm", "LayerNorm", None}
         assert norms.get("residual", None) in {"RMSNorm", "LayerNorm", None}
         
-        if norms["before"] is None:
+        if norms.get("before", None) is None:
             self.bef_ln1 = nn.Identity()
             self.bef_ln2 = nn.Identity()
         else:
             self.bef_ln1 = RMSNorm(d_model=d_model, device=device, dtype=dtype) if norms["before"] == "RMSNorm" else LayerNorm(d_model=d_model, device=device, dtype=dtype) 
             self.bef_ln2 = RMSNorm(d_model=d_model, device=device, dtype=dtype) if norms["before"] == "RMSNorm" else LayerNorm(d_model=d_model, device=device, dtype=dtype)
-        if norms["after"] is None:
+        if norms.get("after", None) is None:
             self.aft_ln1 = nn.Identity()
             self.aft_ln2 = nn.Identity()
         else:
             self.aft_ln1 = RMSNorm(d_model=d_model, device=device, dtype=dtype) if norms["after"] == "RMSNorm" else LayerNorm(d_model=d_model, device=device, dtype=dtype) 
             self.aft_ln2 = RMSNorm(d_model=d_model, device=device, dtype=dtype) if norms["after"] == "RMSNorm" else LayerNorm(d_model=d_model, device=device, dtype=dtype)
-        if norms["residual"] is None:
+        if norms.get("residual", None) is None:
             self.res_ln1 = nn.Identity()
             self.res_ln2 = nn.Identity()
         else:
@@ -84,7 +84,7 @@ class TransformerLM(nn.Module):
                 ) for _ in range(num_layers)]
         )
 
-        if norms["final"] is None:
+        if norms.get("final", None) is None:
             self.ln_final = nn.Identity()
         else:
             self.ln_final = RMSNorm(d_model=d_model, device=device, dtype=dtype) if norms["final"] == "RMSNorm" else LayerNorm(d_model=d_model, device=device, dtype=dtype)

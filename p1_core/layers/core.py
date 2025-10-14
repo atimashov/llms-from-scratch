@@ -46,6 +46,8 @@ class Linear(nn.Module):
             data = torch.empty(out_features, in_features, dtype=dtype, device=device)
             if clip_w is not None:
                 nn.init.trunc_normal_(data, mean=0.0, std=std, a=-clip_w, b=clip_w)
+            else:
+                nn.init.normal_(data, mean=0.0, std=std)
             self.W = nn.Parameter(data)
     
     def forward(self, X: torch.Tensor) -> torch.Tensor:
