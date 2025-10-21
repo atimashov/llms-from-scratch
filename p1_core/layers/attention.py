@@ -24,10 +24,10 @@ class MultiHeadSelfAttention(nn.Module):
     """
     d_model: int Dimensionality of the Transformer block inputs
     num_heads: int Number of heads to use in multi-head self-attention.
-    TODO: check dtype/device correctness; add documentation; work on reproducibility (seed)
+    TODO: check dtype/device correctness; add documentation;
     """
     def __init__(
-        self, d_model: int, num_heads: int, theta: float = 10000.0, context_length = 10000, 
+        self, d_model: int, num_heads: int, theta: float = 10000.0, context_length = 10000, max_len = 10000, kv_cache: bool = False,
         init_type: str = 'xavier', clip_w: float = 3.0, device: torch.device | None = None, dtype: torch.dtype | None = None
         ):
         super().__init__()
@@ -42,15 +42,66 @@ class MultiHeadSelfAttention(nn.Module):
         # init RoPE
         self.rope = RoPE(theta = theta, d_k = self.d_k, max_seq_len= context_length, device=device, dtype = dtype) if theta is not None else None
         self.device = device
+        # init KV Cache
+        if kv_cache:
+            # NOTE: for now it works only for batch_size = 1
+            with torch.no_grad():
+                self.kv_cache = {
+                    "K": torch.zeros((1, max_len, d_model), device = device, dtype = dtype)
+                    "V": torch.zeros((1, max_len, d_model), device = device, dtype = dtype)
+                }
+    
+    def get_proj_q(self, x):
+        """
+        Compute query (Q) projection.
+
+        if KV cache is enamled, it will return just projection on the last token.
+        Otherwise - projection of all sequence.
+
+        Args:
+            x:  (batch_size, seq_len, d_model)
+
+        Returns:
+            Q: (batch_size, seq_len, d_model) or (batch_size, 1, d_model)
+        """
+        Q = self.P_Q(x[:,-1:,:] if hasattr(self, "kv_cache") else x)
+        return rearrange(Q, "... seq_len (h d_k) -> ... h seq_len d_k", h = self.num_heads)
+
+    def get_proj_kv(self, x: torch.Tensor, name: str):
+        """
+        Compute and (optionally) update K/V cache.
+
+        If 'kv_cache' is turned off (training, full seq inference), projects the entire input.
+        If 'kv_cache' is turned on (autoregessive inference), updates only the last token in the cache
+        and returns the prefix uo to seq_len.
+
+        Args:
+            x:  (batch_size, seq_len, d_model)
+            name: 'K' or 'V'
+
+        Returns:
+            out: (batch_size, h, seq_len, d_proj)
+        """
+        assert name in {"K", "V"}, f"Name can be only 'K' or 'V' but provided '{name}'"
+        # dynamically select projection
+        proj = getattr(self, f"P_{name}")
+
+        if hasattr(self, "kv_cache"):
+            _, seq_len, _ = x.shape
+            assert seq_len <= self.kv_cache[name].shape[1], "Exceeded max_len of KV cache"
+
+            self.kv_cache[name][:, seq_len-1:seq_len,:] = proj(x[:,-1:,:]) # batch_size x 1 x d_model
+            out = self.kv_cache[name][:,:seq_len,:]
+        else:
+            out = proj(x)  # batch_size x seq_len x d_model
+        out = rearrange(out, "... seq_len (h d_proj) -> ... h seq_len d_proj", h = self.num_heads)
+        return out 
 
     def forward(self, x: torch.Tensor, is_masked: bool = True, with_rope = True, token_positions = None):
-        # project x to get queries, keys and values
-        Q = self.P_Q(x)
-        Q = rearrange(Q, "... seq_len (h d_k) -> ... h seq_len d_k", h = self.num_heads)
-        K = self.P_K(x)
-        K = rearrange(K, "... seq_len (h d_k) -> ... h seq_len d_k", h = self.num_heads)
-        V = self.P_V(x)
-        V = rearrange(V, "...  seq_len (h d_v) -> ... h seq_len d_v", h = self.num_heads)
+        # project x to get queries (Q), keys (K) and values
+        Q = self.get_proj_q(x)  # batch_size x h x seq_len x d_qk  or batch_size x 1 x d_qk (KV cache)
+        K = self.get_proj_kv(x, "K")  # batch_size x h x seq_len x d_qk
+        V = self.get_proj_kv(x, "V")  # batch_size x h x seq_len x d_v
         # apply RoPE
         if with_rope and self.rope is not None:
             Q = self.rope(Q)
