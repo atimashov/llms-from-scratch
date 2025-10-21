@@ -7,17 +7,18 @@ from p1_core.utils import softmax
 
 def scaled_dot_product_attention(Q: torch.Tensor, K: torch.Tensor, V: torch.Tensor, mask: torch.Tensor | None):
     """
-    Q, K:  (batch_size, ..., seq_len, d_k)
-    V:  (batch_size, ..., seq_len, d_v)
+    Q:  (batch_size, ..., seq_len_q, d_qk) # seq_len_q = 1 for KV Cache
+    K:  (batch_size, ..., seq_len_kv, d_qk)
+    V:  (batch_size, ..., seq_len_kv, d_v)
     """
-    d_k = K.shape[-1]
+    d_qk = K.shape[-1]
     # seq_len is the same for both, but I distinguish the ordering
-    scores = einsum(Q, K, "... seq_len_q d_k, ... seq_len_k d_k -> ... seq_len_q seq_len_k") 
+    scores = einsum(Q, K, "... seq_len_q d_qk, ... seq_len_kv d_qk -> ... seq_len_q seq_len_kv") 
     scores = scores.clamp(min = -80, max=80.0)
     if mask is not None:
         scores = scores.masked_fill(~mask, float('-inf'))
-    weights = softmax(scores / (d_k ** 0.5), dim = -1)
-    att = einsum(weights, V, "... seq_len seq_len2, ... seq_len2 d_v -> ... seq_len d_v")
+    weights = softmax(scores / (d_qk ** 0.5), dim = -1)
+    att = einsum(weights, V, "... seq_len_q seq_len_kv, ... seq_len_kv d_v -> ... seq_len_q d_v")
     return att
 
 class MultiHeadSelfAttention(nn.Module):
@@ -43,12 +44,12 @@ class MultiHeadSelfAttention(nn.Module):
         self.rope = RoPE(theta = theta, d_k = self.d_k, max_seq_len= context_length, device=device, dtype = dtype) if theta is not None else None
         self.device = device
         # init KV Cache
-        if kv_cache:
+        if kv_cache: # TODO: check if dtype is correct for AMP
             # NOTE: for now it works only for batch_size = 1
             with torch.no_grad():
                 self.kv_cache = {
-                    "K": torch.zeros((1, max_len, d_model), device = device, dtype = dtype)
-                    "V": torch.zeros((1, max_len, d_model), device = device, dtype = dtype)
+                    "K": torch.zeros((1, num_heads, max_len, self.d_k), device = device, dtype = dtype),
+                    "V": torch.zeros((1, num_heads, max_len, self.d_v), device = device, dtype = dtype),
                 }
     
     def get_proj_q(self, x):
@@ -72,8 +73,8 @@ class MultiHeadSelfAttention(nn.Module):
         Compute and (optionally) update K/V cache.
 
         If 'kv_cache' is turned off (training, full seq inference), projects the entire input.
-        If 'kv_cache' is turned on (autoregessive inference), updates only the last token in the cache
-        and returns the prefix uo to seq_len.
+        If 'kv_cache' is turned on (autoregressive inference), updates only the last token in the cache
+        and returns the prefix up to seq_len.
 
         Args:
             x:  (batch_size, seq_len, d_model)
@@ -87,15 +88,18 @@ class MultiHeadSelfAttention(nn.Module):
         proj = getattr(self, f"P_{name}")
 
         if hasattr(self, "kv_cache"):
-            _, seq_len, _ = x.shape
-            assert seq_len <= self.kv_cache[name].shape[1], "Exceeded max_len of KV cache"
+            batch_size, seq_len, _ = x.shape
+            assert seq_len <= self.kv_cache[name].shape[2], "Exceeded max_len of KV cache"
+            assert batch_size == 1, f"Currently support batch_size = 1, but provided {batch_size}"
 
-            self.kv_cache[name][:, seq_len-1:seq_len,:] = proj(x[:,-1:,:]) # batch_size x 1 x d_model
-            out = self.kv_cache[name][:,:seq_len,:]
+            proj_new = proj(x[:,-1:,:]) # batch_size x 1 x d_model
+            proj_new = rearrange(proj_new, "... seq_len (h d_proj) -> ... h seq_len d_proj", h = self.num_heads) # batch_size x num_heads x 1 x d_model
+            self.kv_cache[name][:, :, seq_len-1:seq_len,:] = proj_new
+            out = self.kv_cache[name][:,:,:seq_len,:]
         else:
             out = proj(x)  # batch_size x seq_len x d_model
-        out = rearrange(out, "... seq_len (h d_proj) -> ... h seq_len d_proj", h = self.num_heads)
-        return out 
+            out = rearrange(out, "... seq_len (h d_proj) -> ... h seq_len d_proj", h = self.num_heads)
+        return out
 
     def forward(self, x: torch.Tensor, is_masked: bool = True, with_rope = True, token_positions = None):
         # project x to get queries (Q), keys (K) and values
