@@ -71,7 +71,7 @@ class MultiHeadSelfAttention(nn.Module):
         self.rope = RoPE(theta = theta, d_qk = self.d_qk, max_seq_len= context_length, device=device, dtype = dtype) if theta is not None else None
         
         # Init KV Cache
-        if kv_cache: # TODO: check if dtype is correct for AMP
+        if kv_cache:
             # NOTE: for now it works only for batch_size = 1
             with torch.no_grad():
                 self.kv_cache = {
@@ -141,7 +141,7 @@ class MultiHeadSelfAttention(nn.Module):
         
         # Create mask
         if is_masked:
-            mask = ~torch.triu(torch.full((Q.shape[-2], K.shape[-2]), True, device = self.device), diagonal=1)
+            mask = ~torch.triu(torch.full((Q.shape[-2], K.shape[-2]), True, device = x.device), diagonal=1)
         else:
             mask = None
         
@@ -168,6 +168,7 @@ class MultiHeadLatentAttention(nn.Module):
         self.d_model = d_model
         self.d_latent = d_latent        
         self.d_h = d_model // num_heads
+        assert self.d_h % 2 == 0, "d_h must be divisible by 2"
         self.d_hr = self.d_h // 2
 
         self.device = device
@@ -180,21 +181,21 @@ class MultiHeadLatentAttention(nn.Module):
         self.P_DQ = Linear(d_model, d_latent, init_type, clip_w, device = device, dtype=dtype)
         self.P_UQ = Linear(d_latent, self.num_heads * self.d_h, init_type, clip_w, device = device, dtype=dtype)
 
-        self.P_QR = Linear(d_latent, self.d_hr * self.num_heads, init_type, clip_w, device = device, dtype=dtype)
-        self.P_KR = Linear(d_model, self.d_hr, init_type, clip_w, device = device, dtype=dtype)
+        self.P_RQ = Linear(d_latent, self.d_hr * self.num_heads, init_type, clip_w, device = device, dtype=dtype)
+        self.P_RK = Linear(d_model, self.d_hr, init_type, clip_w, device = device, dtype=dtype)
 
         self.P_O = Linear(self.num_heads * self.d_h, d_model, init_type, clip_w, device = device, dtype=dtype)
         
         # Init RoPE
-        self.rope = RoPE(theta = theta, d_k = self.d_qk, max_seq_len= context_length, device=device, dtype = dtype) if theta is not None else None
+        self.rope = RoPE(theta = theta, d_k = self.d_hr, max_seq_len= context_length, device=device, dtype = dtype) if theta is not None else None
         
         # Init KV Cache
         if kv_cache: # TODO: check if dtype is correct for AMP
             # NOTE: for now it works only for batch_size = 1
             with torch.no_grad():
                 self.kv_cache = {
-                    "K": torch.zeros((1, self.num_heads_kv, max_len, self.d_qk), device = device, dtype = dtype),
-                    "V": torch.zeros((1, self.num_heads_kv, max_len, self.d_v), device = device, dtype = dtype),
+                    "c_KV": torch.zeros((1, max_len, self.d_latent), device = device, dtype = dtype),
+                    "K_R": torch.zeros((1, 1, max_len, self.d_hr), device = device, dtype = dtype),
                 }
     
     def get_proj_q(self, x):
@@ -247,33 +248,30 @@ class MultiHeadLatentAttention(nn.Module):
         return out
 
     def forward(self, x: torch.Tensor, is_masked: bool = True, with_rope = True, token_positions = None):
-        # # Project x to latents
-        # c_KV = self.P_DKV(x) # batch_size x seq_len x d_latent
-        # c_Q = self.P_DQ(x) # batch_size x seq_len x d_latent
+        # Project x to latents
+        c_KV = self.P_DKV(x) # batch_size x seq_len x d_latent
+        c_Q = self.P_DQ(x) # batch_size x seq_len x d_latent
 
-        # # Project latent to heads dimension
-        # K, V = self.P_UK(c_KV), self.P_UV(c_KV) # batch_size x seq_len x hn_h
-        # K = rearrange(K, "")
+        # Project latent to heads dimension
+        Q = self.P_UQ(c_Q)
+        Q = rearrange(Q, "... seq_len (h d_h) -> ... h seq_len d_h", h = self.num_heads)
+        K = self.P_UK(c_KV) # batch_size x seq_len x hn_h
+        K = rearrange(K, "... seq_len (h d_h) -> ... h seq_len d_h", h = self.num_heads)
+        V = self.P_UV(c_KV)      
+        V = rearrange(V, "... seq_len (h d_h) -> ... h seq_len d_h", h = self.num_heads)
         
-        # K, V = 
-        # Q = self.P_UQ(c_Q)
-        
-        
-        
-        
-        # Project x to get queries (Q), keys (K) and values
-        Q = self.get_proj_q(x)  # batch_size x h x seq_len x d_qk  or batch_size x 1 x d_qk (KV cache)
-        K = self.get_proj_kv(x, "K")  # batch_size x h x seq_len x d_qk
-        V = self.get_proj_kv(x, "V")  # batch_size x h x seq_len x d_v
-        
-        # Apply RoPE
+        # Apply RoPE (NOTE: think if it makes sense without RoPE)
         if with_rope and self.rope is not None:
-            Q = self.rope(Q)
-            K = self.rope(K)
+            Q_R = rearrange(self.P_RQ(c_Q), "... seq_len (h d_hr) -> ... h seq_len d_hr", h = self.num_heads)
+            Q_R = self.rope(Q_R) # batch_size x h x seq_len x d_hr
+            Q = torch.cat([Q, Q_R], dim = -1) # batch_size x h x seq_len x (d_h+d_hr)
+            K_R = rearrange(self.P_RK(x), "... seq_len d_hr -> ... 1 seq_len d_hr")
+            K_R = self.rope(K_R) # batch_size x 1 x seq_len x d_qk
+            K = torch.cat([K, K_R.expand(-1, self.num_heads, -1, -1)], dim = -1) # batch_size x h x seq_len x (d_h+d_hr)
         
         # Create mask
         if is_masked:
-            mask = ~torch.triu(torch.full((Q.shape[-2], K.shape[-2]), True, device = self.device), diagonal=1)
+            mask = ~torch.triu(torch.full((Q.shape[-2], K.shape[-2]), True, device = x.device), diagonal=1)
         else:
             mask = None
         
