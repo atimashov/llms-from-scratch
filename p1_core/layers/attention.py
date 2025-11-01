@@ -30,6 +30,8 @@ def scaled_dot_product_attention(Q: torch.Tensor, K: torch.Tensor, V: torch.Tens
     
     # Compute weights
     weights = softmax(scores / (d_qk ** 0.5), dim = -1)
+    
+    # Compute attention
     attn = einsum(weights, V, "... seq_len_q seq_len_kv, ... seq_len_kv d_v -> ... seq_len_q d_v")
 
     # Rearrange to (batch_size, seq_len, h_q * d_v)
