@@ -32,9 +32,13 @@ def save_checkpoint(model, optimizer, scaler, scheduler_params: dict, iteration,
         with open(config_path, "w") as f:
             yaml.dump(config, f)
 
-def load_checkpoint(src, model, optimizer = None, scaler = None, device = "cpu"):
+def load_checkpoint(src, model, optimizer = None, scaler = None, device = "cpu", remap = False):
     obj = torch.load(src, map_location = device)
     
+    # Remap model keys
+    if remap:
+        obj["model"] = remap_state_dict(obj["model"])
+
     # Load model weights
     model.load_state_dict(obj["model"])
 
@@ -55,3 +59,28 @@ def load_checkpoint(src, model, optimizer = None, scaler = None, device = "cpu")
         obj.get("loss_report", None),
         scheduler_cfg
     )
+
+def remap_state_dict(sd_old: dict) -> dict:
+    sd_new = {}
+    for k, v in sd_old.items():
+        k2 = k
+
+        # layernorm renames
+        k2 = k2.replace(".ln1.", ".aft_ln1.")
+        k2 = k2.replace(".ln2.", ".aft_ln2.")
+
+        # attention projection param now stores weight under ".W"
+        if ".attn.P_Q" in k2 and not k2.endswith(".W"):
+            k2 = k2 + ".W"
+        if ".attn.P_K" in k2 and not k2.endswith(".W"):
+            k2 = k2 + ".W"
+        if ".attn.P_V" in k2 and not k2.endswith(".W"):
+            k2 = k2 + ".W"
+        if ".attn.P_O" in k2 and not k2.endswith(".W"):
+            k2 = k2 + ".W"
+
+        # FFN rename: W3 -> V
+        k2 = k2.replace(".ffn.W3.W", ".ffn.V.W")
+
+        sd_new[k2] = v
+    return sd_new

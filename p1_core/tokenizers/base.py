@@ -114,6 +114,14 @@ class Tokenizer(ABC):
         # update vocab size
         self.cur_vsize = len(self.vocab)
         self.vocab_size = len(self.vocab)
+
+        # add "end of text" token 
+        self.eof_token = None
+        for i, k in self.vocab.items():
+            if k == "<|endoftext|>".encode("utf-8"):
+                self.eof_token = i
+                break
+
         # deserialize merges
         if merges_path:
             with open(merges_path, "rb") as f:

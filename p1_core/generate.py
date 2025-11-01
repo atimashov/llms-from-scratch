@@ -36,7 +36,7 @@ class Generator:
 
     def _init_model(self, model_params: dict, model_path: str):
         model = TransformerLM(**model_params)
-        load_checkpoint(model_path, model, None, model_params["device"])
+        load_checkpoint(model_path, model, None, model_params["device"], remap = True)
         model.eval()
         return model
     
@@ -73,7 +73,7 @@ class Generator:
     def generate(self, prompt: str, tau: float = 1.0, topk: int | None = None):
         # encode
         assert len(prompt) > 0, "We expect some prompt, but you entered nothing."
-        tokens_list = self.tokenizer.encode(prompt)
+        tokens_list = self.tokenizer.encode_prev(prompt)
         tokens = torch.as_tensor(tokens_list, device = self.device, dtype = torch.long)
         if tokens.ndim == 1:
             tokens = tokens.unsqueeze(0)
@@ -82,15 +82,13 @@ class Generator:
         # decode TODO: modify to decode on the fly
         return self.tokenizer.decode(tokens_pred)
 
-            
-
 if __name__ == '__main__':
     seed = 123
     torch.manual_seed(seed)
 
     # read config
     parser = ArgumentParser()
-    parser.add_argument('--config', type=str, default='config_gen.yaml', help='config file')
+    parser.add_argument('--config', type=str, default='configs/gen.yaml', help='config file')
     parser.add_argument('--prompt', type=str, default="Once upon a time", help='Prompt to generate text')
     parser.add_argument('--tau', type=float, default=1.0, help='Temperature')
     parser.add_argument('--topk', type=int, default=100, help='Top K')

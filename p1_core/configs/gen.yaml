@@ -9,8 +9,19 @@ model:
   num_layers: 4
   num_heads: 16 # 17M non-embedding parameters
   dtype: float32
-  load_prefix: "~/ai_projects/Natural_Language_Processing/p2_transformers/weights/TinyStoriesV2-GPT4/RTX5090"
-  load_name: "exp_bs_64_step_bs_64/cosine/steps_20000/warmup_1000/Lion/lrmax3e-4_lrmin3e-5_wdecay5e-4/dmodel_512_dff_1344_numlayers_4_numheads_16_cntx_256/20250828_180938/ckpt_best.pt"
+  activation: "SiLU"
+  is_gate: True
+  inits:
+    type_ff: 'xavier'
+    std_emb: 0.02
+    clip_w: 3.0
+  norms: # can be either 'RMSNorm', 'LayerNorm', None
+    before: Null 
+    after: 'RMSNorm'
+    residual: Null
+    final: 'RMSNorm'
+train:
+  ckpt_load_from: "checkpoints/TinyStoriesV2-GPT4/z_0e/RTX5090/exp_bs_64_step_bs_64/loss_init/cosine/steps_20000/warmup_1000/Lion/lrmax3e-4_lrmin3e-5_wdecay5e-4/dmodel_512_dff_1344_numlayers_4_numheads_16_cntx_256/20250828_180938/ckpt_best.pt"
 tokenizer:
   special_tokens: ["<|endoftext|>"]
   files_path: "~/ai_projects/data/TinyStoriesV2-GPT4" #-train"

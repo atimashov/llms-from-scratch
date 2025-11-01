@@ -95,7 +95,7 @@ def parse_config(config, mode: str = "train"):
         "device": device,
         "dtype": dtype_map[config["model"]["dtype"]]
     }
-    ckpt_path = None if config["train"].get("ckpt_load_from", None) is None else Path(config["train"]["ckpt_load_from"]).expanduser()
+    ckpt_path = None if config.get("train", {}).get("ckpt_load_from", None) is None else Path(config["train"]["ckpt_load_from"]).expanduser()
     if mode == "train":
         # run's and scheduler's variables
         assert "optim_step_batch_size" not in config["train"] or config["train"]["optim_step_batch_size"] % config["train"]["batch_size"] == 0, "'optim step batch size' should be divisible by 'batch size'"
