@@ -1,9 +1,10 @@
 import os
-import torch
+from typing import Any, Type
 from torch import nn
 import torch.distributed as dist
 import torch.multiprocessing as mp
 from torch._utils import _flatten_dense_tensors, _unflatten_dense_tensors
+from torch.optim import Optimizer
 
 
 def setup(rank, world_size):
@@ -14,7 +15,7 @@ def setup(rank, world_size):
     dist.init_process_group("gloo", rank=rank, world_size=world_size)
 
 class DDP(nn.Module):
-    """Works for 1 node"""
+    """Distributed Data Parallel. Works for 1 node"""
     def __init__(self, module: torch.nn.Module, bucket_size_mb: float | None = None): 
         # Given an instantiated PyTorch nn.Module to be parallelized, construct a DDP container that will handle gradient synchronization across ranks.
         super().__init__()
@@ -118,3 +119,55 @@ class DDP(nn.Module):
             dist.broadcast(flat_b, src = src)
             for b, ufb in zip(model.buffers(), _unflatten_dense_tensors(flat_b, buffs)):
                 b.data.copy_(ufb)
+
+
+class ShardedOptimizer(Optimizer):
+    """ZeRO-1 style sharded optimizer."""
+    def __init__(self, params, optimizer_cls: Type[Optimizer], **kwargs: Any): 
+        super().__init__(params, kwargs)
+        
+        assert dist.is_initialized(), "init_process_group must be called first."
+        self.group = dist.group.WORLD
+        self.rank  = dist.get_rank(self.group)
+        self.world_size = dist.get_world_size(self.group)
+
+        # Shard parameters
+        self.owner_rank: dict[int, int] = dict() # id(param) -> rank
+        self.params_by_owner: list[list[nn.Parameter]] = [[] for _ in range(self.world_size)]
+        self._shard_params()
+
+        # Construct optimizer
+        self.opt = optimizer_cls(self.params_by_owner[self.rank], **kwargs)
+
+    def _shard_params(self):
+        # TODO: deal with duplicated parameters (e.g. tied weights)
+        loads = [0] * self.world_size
+        for param_group in self.param_groups:
+            for p in param_group["params"]:
+                i = min(range(self.world_size), key=lambda k: loads[k]) # get rank with min params 
+                self.params_by_owner[i].append(p)
+                loads[i] += p.numel()
+
+    @torch.no_grad()
+    def _broadcast_params_per_owner(self):
+        for src in range(self.world_size):
+            plist = self.params_by_owner[src] # NOTE: why not to create detach here?
+            if not plist: 
+                continue
+            flat_p = _flatten_dense_tensors([p.detach().contiguous() for p in plist]) # NOTE: a lot of iterations
+            dist.broadcast(flat_p, src=src, group=self.group)
+            if src != self.rank:
+                for p, up in zip(plist, _unflatten_dense_tensors(flat_p, [p.detach() for p in plist])): # NOTE: a lot of iterations
+                    p.copy_(up)
+
+    def step(self, closure = None, **kwargs):
+        # Local optimizer step (LBFGS, Adam, whatever)
+        loss = self.opt.step(closure, **kwargs)
+        # Synchronize parameters and buffers across ranks
+        self._broadcast_params_per_owner()
+        return loss
+
+    # TODO: implement this if I decide to add groups during training
+    # def add_param_group(self, param_group: dict[str, Any]):
+    #     super().add_param_group(param_group)
+

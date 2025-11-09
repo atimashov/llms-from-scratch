@@ -2,8 +2,8 @@ import torch
 from torch import nn
 from torch.optim import Optimizer
 from collections.abc import Callable, Iterable
-import math
 from typing import Dict
+from argparse import ArgumentParser
 
 
 class VanillaGD(Optimizer):
