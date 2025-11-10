@@ -61,6 +61,7 @@ conda activate llms
 ``` sh
 cd llm_core
 python run_tokenizer.py --use-case save_tokens --dataset-name OpenWebText --file-tokenize train.txt # TinyStoriesV2-GPT4
+python run_tokenizer.py --use-case save_tokens --dataset-name OpenWebText --load-from 20251110_112141 --file-tokenize valid.txt # TinyStoriesV2-GPT4
 ```
 💡 Use `--num-processes` carefully based on your system’s RAM and CPU cores.
 
