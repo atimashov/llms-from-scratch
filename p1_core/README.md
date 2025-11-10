@@ -37,9 +37,9 @@ wget https://huggingface.co/datasets/roneneldan/TinyStories/resolve/main/TinySto
 mkdir OpenWebText && cd OpenWebText && mkdir raw_data && cd raw_data
 
 wget https://huggingface.co/datasets/stanford-cs336/owt-sample/resolve/main/owt_train.txt.gz
-gunzip owt_train.txt.gz
+gunzip owt_train.txt.gz && mv owt_train.txt train.txt
 wget https://huggingface.co/datasets/stanford-cs336/owt-sample/resolve/main/owt_valid.txt.gz
-gunzip owt_valid.txt.gz
+gunzip owt_valid.txt.gz && mv owt_valid.txt valid.txt
 ```
 
 Return to the repo root:
