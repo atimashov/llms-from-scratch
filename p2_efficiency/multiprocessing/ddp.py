@@ -100,7 +100,7 @@ class DDP(nn.Module):
                 flat_g.div_(ws)                    
                 for g_dst, g_uf in zip(grads, _unflatten_dense_tensors(flat_g, grads)):
                     g_dst.copy_(g_uf)
-            buffer.clear
+            buffer.clear()
             
     @torch.no_grad()
     def broadcast_module(self, model, src = 0):
