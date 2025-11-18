@@ -1,6 +1,7 @@
 from einops import rearrange, einsum
 import torch
 from torch import nn
+from typing import List
 from .pos_enc import RoPE
 from .core import Linear
 from p1_core.utils import softmax
@@ -48,8 +49,9 @@ class MultiHeadSelfAttention(nn.Module):
     TODO: check dtype/device correctness; add documentation;
     """
     def __init__(
-        self, d_model: int, num_heads: int, kv_heads_ratio: int = 1, theta: float = 10000.0, context_length = 10000, max_len = 10000,
-        init_type: str = 'xavier', clip_w: float = 3.0, device: torch.device | None = None, dtype: torch.dtype | None = None
+        self, d_model: int, num_heads: int, kv_heads_ratio: int = 1, theta: float = 10000.0, 
+        context_length = 10000, max_len = 10000, init_type: str = 'xavier', clip_w: float = 3.0,
+        device: torch.device | None = None, dtype: torch.dtype | None = None, kv_cache: bool = False
         ):
         super().__init__()
         assert d_model % num_heads == 0, "d_model must be divisible by num_heads"
@@ -70,7 +72,16 @@ class MultiHeadSelfAttention(nn.Module):
         # Init RoPE
         self.rope = RoPE(theta = theta, d_qk = self.d_qk, max_seq_len= context_length, device=device, dtype = dtype) if theta is not None else None
     
-    def get_proj_q(self, x: torch.Tensor, with_rope: bool = True, token_positions: torch.Tensor | None = None, kv_cache: bool = False):
+        # Init KV Cache
+        if kv_cache:
+            with torch.no_grad():
+                self.kv_cache = {
+                    "k": torch.zeros((1, self.num_heads_kv, self.max_len, self.d_qk), device = device, dtype = dtype),
+                    "v": torch.zeros((1, self.num_heads_kv, self.max_len, self.d_v), device = device, dtype = dtype),
+                }
+            self.prefilled = False
+
+    def get_proj_q(self, x: torch.Tensor, with_rope: bool = True, token_positions: torch.Tensor | None = None):
         """
         Compute query (Q) projection.
         if KV cache is enabled, it is expected taht sequence length is 1.
@@ -81,9 +92,6 @@ class MultiHeadSelfAttention(nn.Module):
         Returns:
             Q: (batch_size, num_heads, seq_len, d_qk) or (batch_size, num_heads, 1, d_qk)
         """
-        if kv_cache and hasattr(self, "kv_cache"):
-            assert x.size(1) == 1, "During inference, seq_len must be 1."
-
         q = self.P_Q(x)
         q = rearrange(q, "... seq_len (h d_qk) -> ... h seq_len d_qk", h = self.num_heads_q)
         
@@ -91,7 +99,7 @@ class MultiHeadSelfAttention(nn.Module):
             q = self.rope(q, token_positions = token_positions)
         return q
     
-    def get_proj_kv(self, x: torch.Tensor, with_rope: bool = True, token_positions: torch.Tensor | None = None, kv_cache: bool = False):
+    def get_proj_kv(self, x: torch.Tensor, with_rope: bool = True, token_positions: torch.Tensor | None = None):
         """
         Compute and (optionally) update K/V cache.
 
@@ -106,20 +114,13 @@ class MultiHeadSelfAttention(nn.Module):
         Returns:
             out: (batch_size, h, seq_len, d_proj)
         """
-        if kv_cache:
+        if hasattr(self, "kv_cache"):
             batch_size, seq_len, _ = x.shape
             assert seq_len <= self.max_len, "Exceeded max_len of KV cache"
             assert batch_size == 1, f"Currently support batch_size = 1, but provided {batch_size}"
             
             # populate KV Cache (NOTE: for now it works only for batch_size = 1)
-            if not hasattr(self, "kv_cache"):
-                # Init KV Cache
-                with torch.no_grad():
-                    self.kv_cache = {
-                        "k": torch.zeros((1, self.num_heads_kv, self.max_len, self.d_qk), device = x.device, dtype = x.dtype),
-                        "v": torch.zeros((1, self.num_heads_kv, self.max_len, self.d_v), device = x.device, dtype = x.dtype),
-                    }
-                
+            if not self.prefilled:
                 k = self.P_K(x)  # batch_size x seq_len x (h d_qk)
                 k = rearrange(k, "... seq_len (h d_qk) -> ... h seq_len d_qk", h = self.num_heads_kv)
                 if with_rope and self.rope is not None:
@@ -130,6 +131,7 @@ class MultiHeadSelfAttention(nn.Module):
                 v = rearrange(v, "... seq_len (h d_v) -> ... h seq_len d_v", h = self.num_heads_kv)
                 self.kv_cache["v"][:, :, :seq_len,:] = v
                 self.curr_kv_len = seq_len
+                self.prefilled = True
             else:
                 pos = self.curr_kv_len
                 assert pos < self.max_len, "KV cache full"
@@ -160,7 +162,7 @@ class MultiHeadSelfAttention(nn.Module):
         
         return k, v
 
-    def forward(self, x: torch.Tensor, is_masked: bool = True, with_rope = True, token_positions = None, kv_cache = False):
+    def forward(self, x: torch.Tensor, is_masked: bool = True, with_rope = True, kv_cache = False):
         # calculate token positions
         if kv_cache and hasattr(self, "kv_cache"):
             assert x.shape[-2] == 1, "You don't need to provide the whole input after prefill"
@@ -179,31 +181,80 @@ class MultiHeadSelfAttention(nn.Module):
         else:
             mask = None
         
-        # Calculate scaled DPA
-        scaled_mh_att = scaled_dot_product_attention(q, k, v, mask)
+         # Calculate scaled MHA
+        scaled_mha = scaled_dot_product_attention(q, k, v, mask)
         
         # Project an output
-        o = self.P_O(scaled_mh_att)
+        o = self.P_O(scaled_mha)
         return o
+
+class AbsorbedLinear(nn.Module):
+    """
+    Linear Layer absorbing multiple matrices.
+    
+    Args:
+        - layers (torch.Tensor): linear layers to absorb
+        - num_heads (int): number of heads
+    """
+    def __init__(self, layers: List[torch.Tensor], num_heads: int):
+        super().__init__()
+        assert 2 <= len(layers) <= 3, f"It is expected not less than 2 and not more than 3 matrices to absorb, but {len(layers)} provided"
+        
+        if len(layers) == 3:
+            d0_out, _ = layers[0].shape
+            d1_out, d1_in = layers[1].shape
+            _, d2_in = layers[2].shape
+            assert d0_out == d1_in and d1_out == d2_in, "Problems with dimensions"
+            assert d2_in % num_heads == 0, "Output dimension should be divisible by number of heads"
+            with torch.no_grad():
+                W0 = layers[1] @ layers[0]
+                W1 = layers[2]
+        else:
+            d0_out, _ = layers[0].shape
+            _, d1_in = layers[1].shape
+            assert d0_out == d1_in, "Problems with dimensions"
+            assert d1_in % num_heads == 0, "Shared intermediate dimension should be divisible by number of heads"
+            W0 = layers[0]
+            W1 = layers[1]
+        # Split along the shared (h*d_h) dim and absorb per-head
+        W0 = rearrange(W0, "(h d_h) d_in -> h d_h d_in", h = num_heads)
+        W1 = rearrange(W1, "d_out (h d_h) -> h d_out d_h", h = num_heads)
+
+        # Per-head composition: W_head[h] = W1_head[h] @ W0_head[h]
+        W = einsum(W1, W0, "h d_out d_h, h d_h d_in  -> h d_out d_in")
+
+        # Store as buffer (no grad)
+        self.register_buffer("W", W)  # (h, d_out, d_in)
+    
+    def forward(self, X: torch.Tensor) -> torch.Tensor:
+        assert X.device == self.W.device
+        return einsum(X, self.W, "... seq_len d_in, h d_out d_in -> ... h seq_len d_out")
 
 class MultiHeadLatentAttention(nn.Module):
     """
-    d_model: int Dimensionality of the Transformer block inputs
-    num_heads: int Number of heads to use in multi-head self-attention.
+    Args:
+        d_model (int): Dimensionality of the Transformer block inputs
+        d_latent (int): Dimensionality of the latent space  
+        num_heads (int): Number of heads to use in Query.
+        ...
     """
     def __init__(
-        self, d_model: int, d_latent: int, num_heads: int, theta: float = 10000.0, context_length = 10000, max_len = 10000, kv_cache: bool = False,
-        init_type: str = 'xavier', clip_w: float = 3.0, device: torch.device | None = None, dtype: torch.dtype | None = None
+        self, d_model: int, d_latent: int, num_heads: int, theta: float = 10000.0, context_length = 10000, max_len = 10000,
+        init_type: str = 'xavier', clip_w: float = 3.0, device: torch.device | None = None, dtype: torch.dtype | None = None,
+        kv_cache: bool = False
         ):
         super().__init__()
         assert d_model % num_heads == 0, "d_model must be divisible by num_heads"
         self.num_heads = num_heads
+        self.max_len = max_len
         self.d_model = d_model
         self.d_latent = d_latent        
         self.d_h = d_model // num_heads
         assert self.d_h % 2 == 0, "d_h must be divisible by 2"
         self.d_hr = self.d_h // 2
-        
+
+        self.device = device
+
         # Init Projections
         self.P_DKV = Linear(d_model, d_latent, init_type, clip_w, device = device, dtype=dtype)
         self.P_UK = Linear(d_latent, self.num_heads * self.d_h, init_type, clip_w, device = device, dtype=dtype)
@@ -212,107 +263,166 @@ class MultiHeadLatentAttention(nn.Module):
         self.P_DQ = Linear(d_model, d_latent, init_type, clip_w, device = device, dtype=dtype)
         self.P_UQ = Linear(d_latent, self.num_heads * self.d_h, init_type, clip_w, device = device, dtype=dtype)
 
-        self.P_RQ = Linear(d_latent, self.d_hr * self.num_heads, init_type, clip_w, device = device, dtype=dtype)
-        self.P_RK = Linear(d_model, self.d_hr, init_type, clip_w, device = device, dtype=dtype)
+        self.P_QR = Linear(d_latent, self.d_hr * self.num_heads, init_type, clip_w, device = device, dtype=dtype)
+        self.P_KR = Linear(d_model, self.d_hr, init_type, clip_w, device = device, dtype=dtype)
 
         self.P_O = Linear(self.num_heads * self.d_h, d_model, init_type, clip_w, device = device, dtype=dtype)
         
         # Init RoPE
         self.rope = RoPE(theta = theta, d_k = self.d_hr, max_seq_len= context_length, device=device, dtype = dtype) if theta is not None else None
-        
-        # Init KV Cache
-        if kv_cache: # TODO: check if dtype is correct for AMP
-            # NOTE: for now it works only for batch_size = 1
+    
+        if kv_cache:
+            # Init KV Cache
             with torch.no_grad():
                 self.kv_cache = {
-                    "c_KV": torch.zeros((1, max_len, self.d_latent), device = device, dtype = dtype),
-                    "K_R": torch.zeros((1, 1, max_len, self.d_hr), device = device, dtype = dtype),
+                    "c_KV": torch.zeros((1, 1, self.max_len, self.d_latent), device = device, dtype = dtype),
+                    "k_R": torch.zeros((1, 1, self.max_len, self.d_hr), device = device, dtype = dtype),
                 }
-    
-    def get_proj_q(self, x, with_rope):
-        """
-        Compute query (Q) projection.
-        if KV cache is enabled, it is expected taht sequence length is 1.
+            self.prefilled = False
 
+    def get_proj_q(self, x: torch.Tensor, token_positions: torch.Tensor | None = None):
+        """
+        Compute query (Q) as concat of content and rotary channels.
+        if KV cache is enabled, it is expected that sequence length is 1.
+        
         Args:
             x:  (batch_size, seq_len, d_model)
-
+        
         Returns:
-            Q: (batch_size, num_heads, seq_len, d_qk) or (batch_size, num_heads, 1, d_qk)
+            q: (B, H, S, d_qc + d_qr)
         """
+
+        # Absorb matrices if KV
+        if hasattr(self, "kv_cache") and not hasattr(self, "P_KQ_absorbed"):
+            self.P_KQ_absorbed = AbsorbedLinear([self.P_UQ.W, self.P_UK.W.T], self.num_heads)
+            self.P_OV_absorbed = AbsorbedLinear([self.P_UV.W, self.P_O.W], self.num_heads)
+
+        # Project x to latents
+        c_Q = self.P_DQ(x) # (B x S x d_latent)
+    
+        # Content part
         if hasattr(self, "kv_cache"):
-            assert x.size(1) == 1, "With kv_cache, seq_len must be 1."
+            q_C = self.P_KQ_absorbed(c_Q) # (batch_size, h, seq_len, d_latent) 
+        else:
+            q_C = self.P_UQ(c_Q) # (B, S, H * d_h)
+            q_C = rearrange(q_C, "... seq_len (h d_h) -> ... h seq_len d_h", h = self.num_heads) # (batch_size, h, seq_len, d_h)
 
-        c_Q = self.P_DQ(x) # batch_size x seq_len x d_latent
+        # RoPE part
+        q_R = self.P_QR(c_Q) # (B, S, H * d_hr)
+        q_R = rearrange(q_R, "... seq_len (h d_hr) -> ... h seq_len d_hr", h = self.num_heads) # (batch_size, h, seq_len, d_hr)
+        if getattr(self, "rope", None) is not None and q_R.size(-1) > 0:
+            q_R = self.rope(q_R, token_positions = token_positions) # (batch_size, h, seq_len, d_hr)
 
-        # Project latent to heads dimension
-        Q = self.P_UQ(c_Q)
-        Q = rearrange(Q, "... seq_len (h d_h) -> ... h seq_len d_h", h = self.num_heads)
+        # Concatenate Q-content and Q-RoPE along feature dim
+        q = torch.cat((q_C, q_R), dim = -1) # (batch_size, h, seq_len, d_h + d_hr) or (batch_size, h, seq_len, d_latent + d_hr)
+        return q
+    
+    def _absorb_matrices(self, A, B):
+        d_in, _ = A.shape
+        _, d_out = B.shape
+        P_C = Linear(d_in, d_out)
+        P_C.W = A @ B
+        return P_C
 
-        # apply RoPE
-        if with_rope and self.rope is not None:
-            Q_R = rearrange(self.P_RQ(c_Q), "... seq_len (h d_hr) -> ... h seq_len d_hr", h = self.num_heads)
-            Q_R = self.rope(Q_R, token_positions = token_positions) # batch_size x h x seq_len x d_hr
-            Q = torch.cat([Q, Q_R], dim = -1) # batch_size x h x seq_len x (d_h+d_hr)
-
-        return Q
-
-    def get_proj_kv(self, x: torch.Tensor, with_rope: bool = True):
+    def get_proj_kv(self, x: torch.Tensor, token_positions: torch.Tensor | None = None):
         """
         Compute and (optionally) update K/V cache.
-
-        If 'kv_cache' is turned off (training, full seq inference), projects the entire input.
-        If 'kv_cache' is turned on (autoregressive inference), updates only the last token in the cache
-        and returns the prefix up to seq_len.
-
+        
         Args:
             x:  (batch_size, seq_len, d_model)
-            name: 'K' or 'V'
+            token_positions:
 
         Returns:
-            out: (batch_size, h, seq_len, d_proj)
+            k / [c_kv, r_K]: (batch_size, h_or_1, seq_len, d_proj)
+            v / c_KV: (batch_size, h_or_1, seq_len, d_proj)
         """
-
-        if hasattr(self, "kv_cache"): # TODO: modify
+        if hasattr(self, "kv_cache"):
             batch_size, seq_len, _ = x.shape
-            assert seq_len <= self.kv_cache[name].shape[2], "Exceeded max_len of KV cache"
+            assert seq_len <= self.max_len, "Exceeded max_len of KV cache"
             assert batch_size == 1, f"Currently support batch_size = 1, but provided {batch_size}"
+            
+            # 1. Project x to latent space
+            c_KV = self.P_DKV(x) # (batch_size, seq_len, d_latent)
+            c_KV = c_KV.unsqueeze(1) # (batch_size, 1, seq_len, d_latent)
 
-            proj_new = proj(x[:,-1:,:]) # batch_size x 1 x d_model
-            proj_new = rearrange(proj_new, "... seq_len (h d_proj) -> ... h seq_len d_proj", h = self.num_heads_kv) # batch_size x num_heads x 1 x d_model
-            self.kv_cache[name][:, :, seq_len-1:seq_len,:] = proj_new
-            out = self.kv_cache[name][:,:,:seq_len,:]
+            # 2. Project x to RoPE part
+            k_R = self.P_KR(x) # batch_size x seq_len x d_hr
+            if getattr(self, "rope", None) is not None and k_R.size(-1) > 0:
+                k_R = self.rope(k_R, token_positions = token_positions) # batch_size x seq_len x d_hr            
+            k_R = k_R.unsqueeze(1) # (B, 1, S, d_hr)
+
+            # 3. populate KV Cache
+            if not self.prefilled:
+                self.kv_cache["c_KV"][:, :, :seq_len, :] = c_KV
+                self.kv_cache["k_R"][:, :, :seq_len, :] = k_R
+                                
+                # Change flag
+                self.prefilled = True
+
+                # Update current sequence length
+                self.curr_kv_len = seq_len
+            else:
+                pos = self.curr_kv_len
+                assert pos < self.max_len, "KV cache full"
+                assert x.shape[-2] == 1, "You don't need to provide the whole input after prefill"
+
+                self.kv_cache["c_KV"][:, :, pos:pos+1, :] = c_KV
+                self.kv_cache["k_R"][:, :, pos:pos+1, :] = k_R
+
+                # Update current sequence length
+                self.curr_kv_len += 1
+
+            c_KV = self.kv_cache["c_KV"][:, :, :self.curr_kv_len, :] # (batch_size, 1, seq_len, d_latent)
+            k_R = self.kv_cache["k_R"][:, :, :self.curr_kv_len, :] # (batch_size, 1, seq_len, d_hr)
+
+            # Concatenate k (latent content and RoPE)
+            k = torch.cat((c_KV, k_R), dim = -1) # (batch_size, 1, seq_len, d_latent + d_hr) 
+            v_C = c_KV # (batch_size, 1, seq_len, d_latent)
         else:
-            # Project input to latent dimension
-            c_KV = self.P_DKV(x) # batch_size x seq_len x d_latent
-            
-            # Project latent to heads dimension
-            K = self.P_UK(c_KV) # batch_size x seq_len x hn_h
-            K = rearrange(K, "... seq_len (h d_h) -> ... h seq_len d_h", h = self.num_heads)
-            V = self.P_UV(c_KV)      
-            V = rearrange(V, "... seq_len (h d_h) -> ... h seq_len d_h", h = self.num_heads)
-            
-            # Apply RoPE (NOTE: think if it makes sense without RoPE)
-            if with_rope and self.rope is not None:
-                K_R = rearrange(self.P_RK(x), "... seq_len d_hr -> ... 1 seq_len d_hr")
-                K_R = self.rope(K_R) # batch_size x 1 x seq_len x d_qk
-                K = torch.cat([K, K_R.expand(-1, self.num_heads, -1, -1)], dim = -1) # batch_size x h x seq_len x (d_h+d_hr)
-        return K, V
+            # Project x to latents
+            c_KV = self.P_DKV(x) # (batch_size, seq_len, d_latent)
 
-    def forward_train(self, x: torch.Tensor, is_masked: bool = True, with_rope = True, token_positions = None):
-        # get Q, K, V projections
-        Q = self.get_proj_q(x, with_rope = with_rope)  # batch_size x h x seq_len x d_qk  or batch_size x 1 x d_qk (KV cache)
-        K, V = self.get_proj_kv(x, with_rope = with_rope)  # batch_size x h x seq_len x d_qk
-   
+            # RoPE part for K
+            k_R = self.P_KR(x) # (batch_size, seq_len, d_hr)
+            if getattr(self, "rope", None) is not None and k_R.size(-1) > 0:
+                k_R = self.rope(k_R, token_positions = token_positions) # (batch_size, seq_len, d_hr)
+            
+            # Broadcast single-head k_R across heads
+            k_R = k_R.unsqueeze(1) # (batch_size, 1, seq_len, d_hr)
+            
+            # 4. calculate necessary projections
+            k_C = self.P_UK(c_KV) # (batch_size, seq_len, h * d_h)
+            k_C = rearrange(k_C, "... seq_len (h d_h) -> ... h seq_len d_h", h = self.num_heads) # (batch_size, h, seq_len, d_h)
+
+            k_R = k_R.expand(-1, self.num_heads, -1, -1) # (batch_size, h, seq_len, d_hr)
+
+            # Concatenate k
+            k = torch.cat((k_C, k_R), dim = -1) # (batch_size, h, seq_len, d_h + d_hr)
+
+            v_C = self.P_UV(c_KV) # (batch_size, seq_len, h * d_h)
+            v_C = rearrange(v_C, "... seq_len (h d_h) -> ... h seq_len d_h", h = self.num_heads) # (batch_size, h, seq_len, d_h)
+        return k, v_C
+
+    def forward(self, x: torch.Tensor, is_masked: bool = True, kv_cache = False):
+        # calculate token positions
+        if kv_cache and hasattr(self, "kv_cache"):
+            assert x.shape[-2] == 1, "You don't need to provide the whole input after prefill"
+            token_positions_q = token_positions_kv = torch.tensor([self.curr_kv_len], dtype=torch.long, device=x.device)            
+        else:
+            seq_len = x.shape[-2]
+            token_positions_q = token_positions_kv = torch.arange(seq_len, device=x.device)
+
+        # Project x to get queries (Q), keys (K) and values
+        q = self.get_proj_q(x, token_positions_q)  # batch_size x h x seq_len x d_qk
+        k, v_C = self.get_proj_kv(x, token_positions_kv)  # batch_size x h x seq_len x d_qk
+
         # Create mask
-        if is_masked:
-            mask = ~torch.triu(torch.full((Q.shape[-2], K.shape[-2]), True, device = x.device), diagonal=1)
-        else:
-            mask = None
+        mask = ~torch.triu(torch.full((q.shape[-2], k.shape[-2]), True, device = x.device), diagonal=1) if is_masked else None
         
         # Calculate scaled DPA
-        scaled_mh_att = scaled_dot_product_attention(Q, K, V, mask)
+        scaled_mha = scaled_dot_product_attention(q, k, v_C, mask)
         
         # Project an output
-        O = self.P_O(scaled_mh_att)
+        final_proj = self.P_OV_absorbed if kv_cache and hasattr(self, "kv_cache") else self.P_O
+        O = final_proj(scaled_mha)
         return O
