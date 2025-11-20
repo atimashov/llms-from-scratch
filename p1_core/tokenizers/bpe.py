@@ -7,9 +7,6 @@ import pickle
 import numpy as np
 import os
 from tqdm import tqdm
-# import atexit
-
-# from utils.profiling import _log_worker_memory, _print_final_worker_stats
 from .base import Tokenizer
 
 _MERGES = None

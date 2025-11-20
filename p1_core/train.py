@@ -13,8 +13,8 @@ from time import perf_counter, sleep
 from datetime import datetime
 import numpy as np
 
-from models import TransformerLM
-from utils import *
+from p1_core.models import TransformerLM
+from p1_core.utils import *
 
 
 def train_loop(n_iter,  model, optimizer, scaler, tokens, loss_fn, scheduler_params, max_norm, run_params, config = None, flops_per_token: int = 0):
@@ -316,7 +316,7 @@ if __name__ == '__main__':
     print(colored("-" * 200, 'red', attrs=["bold"]))
     # read config
     parser = ArgumentParser()
-    parser.add_argument('--config', type=str, default='config.yaml', help='config file')
+    parser.add_argument('--config', type=str, default='p1_core/configs/train_owt.yaml', help='config file')
     parser.add_argument('--seed', type=int, default=123, help='random seed')
     inputs = parser.parse_args()
 
