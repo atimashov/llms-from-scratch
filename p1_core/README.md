@@ -37,9 +37,9 @@ wget https://huggingface.co/datasets/roneneldan/TinyStories/resolve/main/TinySto
 mkdir OpenWebText && cd OpenWebText && mkdir raw_data && cd raw_data
 
 wget https://huggingface.co/datasets/stanford-cs336/owt-sample/resolve/main/owt_train.txt.gz
-gunzip owt_train.txt.gz
+gunzip owt_train.txt.gz && mv owt_train.txt train.txt
 wget https://huggingface.co/datasets/stanford-cs336/owt-sample/resolve/main/owt_valid.txt.gz
-gunzip owt_valid.txt.gz
+gunzip owt_valid.txt.gz && mv owt_valid.txt valid.txt
 ```
 
 Return to the repo root:
@@ -59,15 +59,16 @@ conda activate llms
 
 ### 1. Run BPE tokenizer test
 ``` sh
-cd llm_core
+cd p1_core
 python run_tokenizer.py --use-case save_tokens --dataset-name OpenWebText --file-tokenize train.txt # TinyStoriesV2-GPT4
+python run_tokenizer.py --use-case save_tokens --dataset-name OpenWebText --load-from 20251110_112141 --file-tokenize valid.txt # TinyStoriesV2-GPT4
 ```
 💡 Use `--num-processes` carefully based on your system’s RAM and CPU cores.
 
 ### 2. Train LLM
 ``` sh
-cd p1-core
-python train.py --config configs/train_owt.yaml
+cd.. # run from the root project folder 
+uv run -m p1_core.train --config p1_core/configs/train_owt.yaml
 ```
 ⚠️ Double-check your `train_owt.yaml` for the correct device, context_length, and dataset path.
 
