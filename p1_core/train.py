@@ -287,7 +287,7 @@ def main(config, random_seed = 123):
     print(
         f"{colored("Model parameters: ", 'blue')}{cnt_params:,} | "
         f"{colored('num_layers=', 'blue')}{model_params["num_layers"]:,} | "
-        f"{colored('num_heads=', 'blue')}{model_params["num_heads"]:,} | "
+        f"{colored('num_heads=', 'blue')}{model_params["attn_params"]["num_heads"]:,} | "
         f"{colored('d_model=', 'blue')}{model_params["d_model"]:,} | "
         f"{colored('d_ff=', 'blue')}{model_params["d_ff"]:,} |"
         f"{colored('Ratio tokens/model_size=', 'blue')}{total_tokens/cnt_params:.2f} |"

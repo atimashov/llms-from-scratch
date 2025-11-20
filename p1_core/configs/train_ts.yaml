@@ -1,9 +1,9 @@
 seed: 123
 dataset_path:
-  prefix: '/workspace/ai_projects/data/TinyStoriesV2-GPT4'
+  prefix: '~/ai_projects/data/TinyStoriesV2-GPT4'
   tokenized: 'tokenized'
 device: 0 # currently no distributed training
-model:
+model: # 17M non-embedding parameters
   vocab_size: 10_000
   context_length: 256 # 256 # 512
   d_model:  512 # 512   # ( 768 is a dimension used in many small Transformer papers)
@@ -11,8 +11,12 @@ model:
   activation: "SiLU"
   is_gate: true
   rope_theta: 10_000
-  num_layers: 4 # 4
-  num_heads: 16 # 16 # 17M non-embedding parameters
+  num_layers: 4
+  attention:
+    type: 'gqa'
+    num_heads: 16
+    num_heads_kv: 4
+    d_latent: 128 # as usual 4 * d_h
   dtype: 'amp'
   mixed_precision_dtype: 'bfloat16'
   inits:
@@ -24,7 +28,7 @@ model:
     after: 'RMSNorm'
     residual: Null
     final: 'RMSNorm'
-  weights_tying: false
+  weights_tying: False
 optimizer:
   name: 'AdamW' # 'Lion' # 
   lr: 2e-3 # 7e-5 #  
@@ -47,7 +51,7 @@ loss:
   name: 'cross_entropy'
   z_alpha: 1e-4
 train:
-  total_tokens_processed: 327_680_000 # 655_360_000 #  1_638_400_000 # 1_228_800_000 # 409_600_000 # 819_200_000 #   983_040_000  batch_size x step_count x context_length
+  total_tokens_processed: 81_920_000 # 327_680_000 # 655_360_000 #  1_638_400_000 # 1_228_800_000 # 409_600_000 # 819_200_000 #   983_040_000  batch_size x step_count x context_length
   total_flops: Null # 4e17 # 2e16 # null # 4 * 10**16
   batch_size: 64
   optim_step_batch_size: 64 # 2560 # 1280
@@ -66,8 +70,8 @@ validate:
       min_steps: 50
       max_steps: 500
   report:
-    steps_ratio: {0.25, 0.5, 0.75}
-    num_samples: 32000
+    steps_ratio: {0.5} # {0.25, 0.5, 0.75}
+    num_samples: 32_000
 serialize:
   path: "checkpoints"
   postfix: ""

@@ -49,15 +49,15 @@ class MultiHeadSelfAttention(nn.Module):
     TODO: check dtype/device correctness; add documentation;
     """
     def __init__(
-        self, d_model: int, num_heads: int, kv_heads_ratio: int = 1, theta: float = 10000.0, 
+        self, d_model: int, num_heads: int, num_heads_kv: int = 1, theta: float = 10000.0, 
         context_length = 10000, max_len = 10000, init_type: str = 'xavier', clip_w: float = 3.0,
         device: torch.device | None = None, dtype: torch.dtype | None = None, kv_cache: bool = False
         ):
         super().__init__()
         assert d_model % num_heads == 0, "d_model must be divisible by num_heads"
-        assert num_heads % kv_heads_ratio == 0, "'num_heads' should be divisible by 'kv_heads_ratio'"
+        assert num_heads % num_heads_kv == 0, "'num_heads' should be divisible by 'num_heads_kv'"
         self.num_heads_q = num_heads # queries
-        self.num_heads_kv = num_heads // kv_heads_ratio   # keys & values
+        self.num_heads_kv = num_heads_kv   # keys & values
         self.max_len = max_len
         self.d_model = d_model
         self.d_qk = d_model // num_heads
@@ -172,8 +172,8 @@ class MultiHeadSelfAttention(nn.Module):
             token_positions_q = token_positions_kv = torch.arange(seq_len, device=x.device)
 
         # Project x to get queries (Q), keys (K) and values
-        q = self.get_proj_q(x, with_rope, token_positions_q, kv_cache = kv_cache)  # batch_size x h x seq_len x d_qk  or batch_size x 1 x d_qk (KV cache)
-        k, v = self.get_proj_kv(x, with_rope, token_positions_kv, kv_cache = kv_cache)  # batch_size x h x seq_len x d_qk
+        q = self.get_proj_q(x, with_rope, token_positions_q)  # batch_size x h x seq_len x d_qk  or batch_size x 1 x d_qk (KV cache)
+        k, v = self.get_proj_kv(x, with_rope, token_positions_kv)  # batch_size x h x seq_len x d_qk
         
         # Create mask
         if is_masked:
@@ -269,7 +269,7 @@ class MultiHeadLatentAttention(nn.Module):
         self.P_O = Linear(self.num_heads * self.d_h, d_model, init_type, clip_w, device = device, dtype=dtype)
         
         # Init RoPE
-        self.rope = RoPE(theta = theta, d_k = self.d_hr, max_seq_len= context_length, device=device, dtype = dtype) if theta is not None else None
+        self.rope = RoPE(theta = theta, d_qk = self.d_hr, max_seq_len= context_length, device=device, dtype = dtype) if theta is not None else None
     
         if kv_cache:
             # Init KV Cache
@@ -316,13 +316,6 @@ class MultiHeadLatentAttention(nn.Module):
         # Concatenate Q-content and Q-RoPE along feature dim
         q = torch.cat((q_C, q_R), dim = -1) # (batch_size, h, seq_len, d_h + d_hr) or (batch_size, h, seq_len, d_latent + d_hr)
         return q
-    
-    def _absorb_matrices(self, A, B):
-        d_in, _ = A.shape
-        _, d_out = B.shape
-        P_C = Linear(d_in, d_out)
-        P_C.W = A @ B
-        return P_C
 
     def get_proj_kv(self, x: torch.Tensor, token_positions: torch.Tensor | None = None):
         """

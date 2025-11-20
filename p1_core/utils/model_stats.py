@@ -31,7 +31,7 @@ def get_model_memory(config):
     seq_len = config["model"]["context_length"]
     ff_ratio = 3 if config["model"] else 2
     n_layers = config["model"]["num_layers"]
-    n_heads = config["model"]["num_heads"]
+    n_heads = config["model"]["attention"]["num_heads"]
     vocab_size = config["model"]["vocab_size"]
     norms = config["model"]["norms"]
     num_emb_matrices = 1 if config["model"]["weights_tying"] else 2
@@ -90,7 +90,7 @@ def get_activations_memory(config):
     S = config["model"]["context_length"]
     V = config["model"]["vocab_size"]
     L = config["model"]["num_layers"]
-    H = config["model"]["num_heads"]
+    H = config["model"]["attention"]["num_heads"]
     gated = config["model"]["is_gate"]
     norms = config["model"]["norms"]
 

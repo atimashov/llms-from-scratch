@@ -74,13 +74,20 @@ def parse_config(config, mode: str = "train"):
     # model parameters
     assert config["model"]["dtype"] in dtype_map, f"Type you provided is not supported: {config["model"]["dtype"]}"
     assert config["model"]["activation"] in {"ReLU", "LeakyReLU", "SqReLU", "SiLU", "GELU"}, f"Type you provided is not supported: {config["model"]["activation"]}"
-    d_model, d_ff, num_heads = config["model"]["d_model"], config["model"]["d_ff"], config["model"]["num_heads"]
+    d_model, d_ff = config["model"]["d_model"], config["model"]["d_ff"]
+    attn_params = config["model"]["attention"]
+    assert "type" in attn_params and "num_heads" in attn_params, f"Not complete set of params for attention, expected at least 'type' and 'num_heads'"
+    assert attn_params["type"] in {"mha", "mqa", "gqa", "mla"}, f"Wrong attention type, supported only 'mha', 'mqa', 'gqa', 'mla'"
+    if attn_params["type"] == "mha":
+        attn_params["num_heads_kv"] = attn_params["num_heads"]
+    if attn_params["type"] == "mqa":
+        attn_params["num_heads_kv"] = 1
     activation, is_gate = config["model"]["activation"], config["model"]["is_gate"]
     num_layers, cntx = config["model"]["num_layers"], config["model"]["context_length"]
     model_params = {
         "d_model": d_model,
         "d_ff": d_ff,
-        "num_heads": num_heads,
+        "attn_params": attn_params,
         "activation": activation, 
         "is_gate": is_gate,
         "num_layers": num_layers,
@@ -95,6 +102,7 @@ def parse_config(config, mode: str = "train"):
         "device": device,
         "dtype": dtype_map[config["model"]["dtype"]]
     }
+
     ckpt_path = None if config.get("train", {}).get("ckpt_load_from", None) is None else Path(config["train"]["ckpt_load_from"]).expanduser()
     if mode == "train":
         # run's and scheduler's variables
@@ -150,7 +158,8 @@ def parse_config(config, mode: str = "train"):
         compile_str = "_cmpl" if config["train"]["compile"] else ""
         weights_tying_str = "_wt" if config["model"]["weights_tying"] else ""
         postfix = "" if config["serialize"]["postfix"] == "" else f"_{config["serialize"]["postfix"]}"
-        model_str = f"cntx_{cntx}_numlayers_{num_layers}_dmodel_{d_model}_dff_{d_ff}_numheads_{num_heads}{rope_str}_{activation_str}_{dtype_str}{compile_str}{weights_tying_str}"
+        attn_type, nheads, nheads_kv = attn_params["type"], attn_params["num_heads"], attn_params.get("num_heads_kv", attn_params["num_heads"]) 
+        model_str = f"cntx_{cntx}_numlayers_{num_layers}_dmodel_{d_model}_dff_{d_ff}_{attn_type}_nh_{nheads}_nh_kv_{nheads_kv}{rope_str}_{activation_str}_{dtype_str}{compile_str}{weights_tying_str}"
         sched_name = config["scheduler"]["name"]
         sched_str = f"{sched_name}/steps_{steps}/warmup_{warmup_iters}"
         optim_suffix = "_tr" if config["optimizer"]["is_trust_ratio"] else ""

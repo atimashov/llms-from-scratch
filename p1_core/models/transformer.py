@@ -3,8 +3,30 @@ from torch import nn
 from einops import rearrange, einsum
 
 from p1_core.utils import softmax
-from p1_core.layers import Embedding, Linear, RMSNorm, LayerNorm, GatedFFN, FFN, MultiHeadSelfAttention
+from p1_core.layers import Embedding, Linear, RMSNorm, LayerNorm, GatedFFN, FFN, MultiHeadSelfAttention, MultiHeadLatentAttention
 
+def get_attention(
+    attn_params:dict, d_model: int, theta: float, context_length: int, 
+    init_type: str, clip_w: float, device: torch.device | None, dtype: torch.dtype | None
+    ):
+    attn_type = attn_params["type"]
+    num_heads = attn_params["num_heads"]
+    num_heads_kv = attn_params.get("num_heads_kv", num_heads)
+    d_latent = attn_params.get("d_latent", None)
+    
+    if attn_type == "mla":
+        attn = MultiHeadLatentAttention(
+            d_model = d_model, d_latent = d_latent, num_heads = num_heads,  theta = theta, 
+            context_length = context_length, max_len = context_length, init_type = init_type,
+            clip_w = clip_w, device = device, dtype = dtype
+            )
+    else:
+        attn = MultiHeadSelfAttention(
+            d_model = d_model, num_heads = num_heads, num_heads_kv = num_heads_kv, theta = theta,
+            context_length = context_length, max_len = context_length, init_type = init_type,
+            clip_w = clip_w, device = device, dtype = dtype
+            )
+    return attn
     
 class TransformerBlock(nn.Module):
     """
@@ -13,7 +35,7 @@ class TransformerBlock(nn.Module):
     d_ff: int Dimensionality of the position-wise feed-forward inner layer.
     """
     def __init__(
-        self, d_model: int, d_ff: int, num_heads: int, activation: str, is_gate: bool, theta: float = 10000.0,
+        self, d_model: int, d_ff: int, attn_params: dict, activation: str, is_gate: bool, theta: float = 10000.0,
         context_length = 10000, init_type: str = 'xavier', clip_w: float = 3.0, norms: dict | None = None, 
         device: torch.device | None = None, dtype: torch.dtype | None = None
         ):
@@ -41,10 +63,10 @@ class TransformerBlock(nn.Module):
             self.res_ln1 = RMSNorm(d_model=d_model, device=device, dtype=dtype) if norms["residual"] == "RMSNorm" else LayerNorm(d_model=d_model, device=device, dtype=dtype) 
             self.res_ln2 = RMSNorm(d_model=d_model, device=device, dtype=dtype) if norms["residual"] == "RMSNorm" else LayerNorm(d_model=d_model, device=device, dtype=dtype)
 
-        self.attn = MultiHeadSelfAttention(
-            d_model = d_model, num_heads = num_heads, theta = theta, context_length = context_length, 
-            init_type = init_type, clip_w = clip_w, device = device, dtype = dtype
-            )
+        self.attn = get_attention(attn_params = attn_params, d_model = d_model, theta = theta, 
+            context_length = context_length, init_type = init_type, clip_w = clip_w, 
+            device = device, dtype = dtype
+        )
         ffn = GatedFFN if is_gate else FFN
         self.ffn = ffn(d_model = d_model, d_hidden = d_ff, init_type = init_type, clip_w = clip_w, activation = activation, device = device, dtype = dtype)
 
@@ -68,7 +90,7 @@ class TransformerLM(nn.Module):
     num_layers: int The number of Transformer blocks to use.
     """
     def __init__(
-        self, d_model: int, d_ff: int, num_heads: int, activation: str, is_gate: bool, num_layers:int = 6, theta: float = 10000.0, 
+        self, d_model: int, d_ff: int, attn_params: dict, activation: str, is_gate: bool, num_layers:int = 6, theta: float = 10000.0, 
         context_length = 256, init_type: str = 'xavier', std_emb: float = 0.02, clip_w: float = 3.0, vocab_size: int = 10_000,
         norms: dict | None = None, weights_tying: bool = False, device: torch.device | None = None, dtype: torch.dtype | None = None
         ):
@@ -79,7 +101,7 @@ class TransformerLM(nn.Module):
         
         self.layers = nn.Sequential(
             *[TransformerBlock(
-                d_model = d_model, d_ff = d_ff, num_heads = num_heads, activation = activation, is_gate = is_gate, theta = theta,
+                d_model = d_model, d_ff = d_ff, attn_params = attn_params, activation = activation, is_gate = is_gate, theta = theta,
                 context_length = context_length, init_type = init_type, clip_w = clip_w, norms = norms, device = device, dtype = dtype
                 ) for _ in range(num_layers)]
         )
