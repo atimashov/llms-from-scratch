@@ -39,6 +39,9 @@ def load_checkpoint(src, model, optimizer = None, scaler = None, device = "cpu",
     if remap:
         obj["model"] = remap_state_dict(obj["model"])
 
+    # Strip known wrappers
+    obj["model"] = _sanitize_state_dict(obj["model"])
+
     # Load model weights
     model.load_state_dict(obj["model"])
 
@@ -84,3 +87,14 @@ def remap_state_dict(sd_old: dict) -> dict:
 
         sd_new[k2] = v
     return sd_new
+
+def _strip_prefix(state_dict: dict, prefix: str) -> dict:
+    if not any(k.startswith(prefix) for k in state_dict.keys()):
+        return state_dict
+    return { (k[len(prefix):] if k.startswith(prefix) else k): v
+             for k, v in state_dict.items() }
+
+def _sanitize_state_dict(sd: dict) -> dict:
+    sd = _strip_prefix(sd, "_orig_mod.")  # torch.compile wrapper
+    sd = _strip_prefix(sd, "module.")     # DataParallel wrapper
+    return sd

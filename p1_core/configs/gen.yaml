@@ -2,26 +2,31 @@ seed: 123
 device: "cpu" #0 # currently no distributed training
 model:
   vocab_size: 10_000
-  context_length: 256
-  d_model: 512 # 768 (dimensions used in many small Transformer papers)
-  d_ff: 1344 # ~8/3 d_model; 64x, which is good for GPU performance.
-  rope_theta: 10_000
-  num_layers: 4
-  num_heads: 16 # 17M non-embedding parameters
-  dtype: float32
+  context_length: 256 # 256 # 512
+  d_model:  512 # 512   # ( 768 is a dimension used in many small Transformer papers)
+  d_ff:  1344 # 1344 # 2016 # 3072 # 6144   ~8/3 d_model; 64x, which is good for GPU performance.
   activation: "SiLU"
-  is_gate: True
+  is_gate: true
+  rope_theta: 10_000
+  num_layers: 4 # 4
+  num_heads: 16 # 16 # 17M non-embedding parameters
+  dtype: 'amp'
+  mixed_precision_dtype: 'bfloat16'
   inits:
     type_ff: 'xavier'
-    std_emb: 0.02
+    std_emb: 1.0
     clip_w: 3.0
-  norms: # can be either 'RMSNorm', 'LayerNorm', None
-    before: Null 
+  norms: # can be either 'RMSNorm', 'LayerNorm', null
+    before: Null
     after: 'RMSNorm'
     residual: Null
     final: 'RMSNorm'
+  weights_tying: false
+
+
 train:
-  ckpt_load_from: "checkpoints/TinyStoriesV2-GPT4/z_0e/RTX5090/exp_bs_64_step_bs_64/loss_init/cosine/steps_20000/warmup_1000/Lion/lrmax3e-4_lrmin3e-5_wdecay5e-4/dmodel_512_dff_1344_numlayers_4_numheads_16_cntx_256/20250828_180938/ckpt_best.pt"
+  # ckpt_load_from: "p1_core/checkpoints/wandb/TinyStoriesV2-GPT4/20251111_003420/ckpt_best.pt"
+  ckpt_load_from: "p1_core/checkpoints/wandb/TinyStoriesV2-GPT4/20251111_005233/ckpt_best.pt"
 tokenizer:
   special_tokens: ["<|endoftext|>"]
   files_path: "~/ai_projects/data/TinyStoriesV2-GPT4" #-train"

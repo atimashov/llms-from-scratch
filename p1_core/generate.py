@@ -7,9 +7,9 @@ from time import perf_counter
 from datetime import datetime
 import numpy as np
 
-from models import TransformerLM
-from tokenizers import BPETokenizer
-from utils import parse_config, load_checkpoint
+from p1_core.models import TransformerLM
+from p1_core.tokenizers import BPETokenizer
+from p1_core.utils import parse_config, load_checkpoint
 
 
 seed = 123
@@ -36,7 +36,7 @@ class Generator:
 
     def _init_model(self, model_params: dict, model_path: str):
         model = TransformerLM(**model_params)
-        load_checkpoint(model_path, model, None, model_params["device"], remap = True)
+        load_checkpoint(model_path, model, device=model_params["device"], remap=True)
         model.eval()
         return model
     
@@ -88,9 +88,9 @@ if __name__ == '__main__':
 
     # read config
     parser = ArgumentParser()
-    parser.add_argument('--config', type=str, default='configs/gen.yaml', help='config file')
+    parser.add_argument('--config', type=str, default='p1_core/configs/gen.yaml', help='config file')
     parser.add_argument('--prompt', type=str, default="Once upon a time", help='Prompt to generate text')
-    parser.add_argument('--tau', type=float, default=1.0, help='Temperature')
+    parser.add_argument('--tau', type=float, default=0.7, help='Temperature')
     parser.add_argument('--topk', type=int, default=100, help='Top K')
     
     inputs = parser.parse_args()
