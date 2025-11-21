@@ -203,6 +203,7 @@ def parse_config(config, mode: str = "train"):
         }
         return model_params, ckpt_path, optim_params, scheduler_params, clip_grad_params, tokens_params, run_params
     if mode == "generate":
+        model_params["kv_cache"] = config["kv_cache"]
         tokenizer_params = {
             "input_path": None,
             "vocab_size": None,

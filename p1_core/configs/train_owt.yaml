@@ -1,18 +1,22 @@
 seed: 123
 dataset_path:
-  prefix: '/workspace/ai_projects/data/OpenWebText'
+  prefix: '~/ai_projects/data/OpenWebText'
   tokenized: 'tokenized'
-device: 0 # currently no distributed training
+device: 0 # no distributed training
 model:
   vocab_size: 32_000
-  context_length: 256 # 256 # 512
+  context_length: 256 # 512
   d_model:  1024 # 512   # ( 768 is a dimension used in many small Transformer papers)
   d_ff:  2688 # 1344 # 2016 # 3072 # 6144   ~8/3 d_model; 64x, which is good for GPU performance.
   activation: "SiLU"
   is_gate: true
   rope_theta: 10_000
-  num_layers: 16 # 4
-  num_heads: 16 # 16 # 17M non-embedding parameters
+  num_layers: 12
+  attention:
+    type: 'mla'
+    num_heads: 16
+    num_heads_kv: 4
+    d_latent: 128 # 256 # as usual 4 * d_h
   dtype: 'amp'
   mixed_precision_dtype: 'bfloat16'
   inits:
@@ -48,7 +52,7 @@ loss:
   z_alpha: 1e-4
 train:
   total_tokens_processed: 327_680_000 # 655_360_000 #  1_638_400_000 # 1_228_800_000 # 409_600_000 # 819_200_000 #   983_040_000  batch_size x step_count x context_length
-  total_flops: 4e17 # 2e16 # null # 4 * 10**16
+  total_flops: Null # 4e17 # 2e16
   batch_size: 32
   optim_step_batch_size: 64 # 2560 # 1280
   loader_mode: 'in_memory_ids' # 'sample' # ,

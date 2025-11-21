@@ -286,6 +286,7 @@ def main(config, random_seed = 123):
      # details of the model
     print(
         f"{colored("Model parameters: ", 'blue')}{cnt_params:,} | "
+        f"{colored("Attention type: ", 'blue')}{model_params["attn_params"]["type"].upper()} | "
         f"{colored('num_layers=', 'blue')}{model_params["num_layers"]:,} | "
         f"{colored('num_heads=', 'blue')}{model_params["attn_params"]["num_heads"]:,} | "
         f"{colored('d_model=', 'blue')}{model_params["d_model"]:,} | "

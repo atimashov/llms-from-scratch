@@ -9,7 +9,11 @@ model:
   is_gate: true
   rope_theta: 10_000
   num_layers: 4 # 4
-  num_heads: 16 # 16 # 17M non-embedding parameters
+  attention:
+    type: 'mla'
+    num_heads: 16
+    num_heads_kv: 4
+    d_latent: 128 # as usual 4 * d_h
   dtype: 'amp'
   mixed_precision_dtype: 'bfloat16'
   inits:
@@ -22,11 +26,10 @@ model:
     residual: Null
     final: 'RMSNorm'
   weights_tying: false
-
-
+kv_cache: True
 train:
   # ckpt_load_from: "p1_core/checkpoints/wandb/TinyStoriesV2-GPT4/20251111_003420/ckpt_best.pt"
-  ckpt_load_from: "p1_core/checkpoints/wandb/TinyStoriesV2-GPT4/20251111_005233/ckpt_best.pt"
+  ckpt_load_from: "checkpoints/TinyStoriesV2-GPT4/wandb/20251121_012441/ckpt_best.pt"
 tokenizer:
   special_tokens: ["<|endoftext|>"]
   files_path: "~/ai_projects/data/TinyStoriesV2-GPT4" #-train"

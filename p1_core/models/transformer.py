@@ -6,8 +6,8 @@ from p1_core.utils import softmax
 from p1_core.layers import Embedding, Linear, RMSNorm, LayerNorm, GatedFFN, FFN, MultiHeadSelfAttention, MultiHeadLatentAttention
 
 def get_attention(
-    attn_params:dict, d_model: int, theta: float, context_length: int, 
-    init_type: str, clip_w: float, device: torch.device | None, dtype: torch.dtype | None
+    attn_params:dict, d_model: int, theta: float, context_length: int, init_type: str,
+    clip_w: float, device: torch.device | None, dtype: torch.dtype | None, kv_cache: bool = False
     ):
     attn_type = attn_params["type"]
     num_heads = attn_params["num_heads"]
@@ -18,13 +18,13 @@ def get_attention(
         attn = MultiHeadLatentAttention(
             d_model = d_model, d_latent = d_latent, num_heads = num_heads,  theta = theta, 
             context_length = context_length, max_len = context_length, init_type = init_type,
-            clip_w = clip_w, device = device, dtype = dtype
+            clip_w = clip_w, device = device, dtype = dtype, kv_cache = kv_cache
             )
     else:
         attn = MultiHeadSelfAttention(
             d_model = d_model, num_heads = num_heads, num_heads_kv = num_heads_kv, theta = theta,
             context_length = context_length, max_len = context_length, init_type = init_type,
-            clip_w = clip_w, device = device, dtype = dtype
+            clip_w = clip_w, device = device, dtype = dtype, kv_cache = kv_cache
             )
     return attn
     
@@ -37,7 +37,7 @@ class TransformerBlock(nn.Module):
     def __init__(
         self, d_model: int, d_ff: int, attn_params: dict, activation: str, is_gate: bool, theta: float = 10000.0,
         context_length = 10000, init_type: str = 'xavier', clip_w: float = 3.0, norms: dict | None = None, 
-        device: torch.device | None = None, dtype: torch.dtype | None = None
+        device: torch.device | None = None, dtype: torch.dtype | None = None, kv_cache: bool = False
         ):
         super().__init__()
         assert norms.get("before", None) in {"RMSNorm", "LayerNorm", None}
@@ -65,7 +65,7 @@ class TransformerBlock(nn.Module):
 
         self.attn = get_attention(attn_params = attn_params, d_model = d_model, theta = theta, 
             context_length = context_length, init_type = init_type, clip_w = clip_w, 
-            device = device, dtype = dtype
+            device = device, dtype = dtype, kv_cache = kv_cache
         )
         ffn = GatedFFN if is_gate else FFN
         self.ffn = ffn(d_model = d_model, d_hidden = d_ff, init_type = init_type, clip_w = clip_w, activation = activation, device = device, dtype = dtype)
@@ -92,7 +92,8 @@ class TransformerLM(nn.Module):
     def __init__(
         self, d_model: int, d_ff: int, attn_params: dict, activation: str, is_gate: bool, num_layers:int = 6, theta: float = 10000.0, 
         context_length = 256, init_type: str = 'xavier', std_emb: float = 0.02, clip_w: float = 3.0, vocab_size: int = 10_000,
-        norms: dict | None = None, weights_tying: bool = False, device: torch.device | None = None, dtype: torch.dtype | None = None
+        norms: dict | None = None, weights_tying: bool = False, device: torch.device | None = None, dtype: torch.dtype | None = None,
+        kv_cache: bool = False
         ):
         super().__init__()
         assert norms.get("final", None) in {"RMSNorm", "LayerNorm", None}
@@ -102,7 +103,7 @@ class TransformerLM(nn.Module):
         self.layers = nn.Sequential(
             *[TransformerBlock(
                 d_model = d_model, d_ff = d_ff, attn_params = attn_params, activation = activation, is_gate = is_gate, theta = theta,
-                context_length = context_length, init_type = init_type, clip_w = clip_w, norms = norms, device = device, dtype = dtype
+                context_length = context_length, init_type = init_type, clip_w = clip_w, norms = norms, device = device, dtype = dtype, kv_cache = kv_cache
                 ) for _ in range(num_layers)]
         )
 
