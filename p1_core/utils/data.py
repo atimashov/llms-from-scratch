@@ -64,7 +64,7 @@ def get_start_seqs(start_from: int | None, bs: int | None, x_len: int | None, in
         if start_from + bs > in_memory_ids.shape[0]:
             offset = start_from + bs - in_memory_ids.shape[0]
             start_seqs = np.concat((start_seqs, in_memory_ids[:offset]), axis = 0)
-    start_seqs = start_seqs[:, None]
+        start_seqs = start_seqs[:, None]
     return start_seqs
 
 def data_loading(x: npt.NDArray, context_length: int, start_seqs: np.ndarray, device: torch.device | None = None) -> (torch.Tensor, torch.Tensor):
