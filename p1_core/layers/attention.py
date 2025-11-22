@@ -12,7 +12,6 @@ def scaled_dot_product_attention(Q: torch.Tensor, K: torch.Tensor, V: torch.Tens
     K:  (batch_size, ..., seq_len_kv, d_qk)
     V:  (batch_size, ..., seq_len_kv, d_v)
     """
-    # print("========Q, K, V=========", Q.shape, K.shape, V.shape)
     d_qk = K.shape[-1]
     H_q, H_kv = Q.shape[1], K.shape[1]
     
@@ -35,12 +34,16 @@ def scaled_dot_product_attention(Q: torch.Tensor, K: torch.Tensor, V: torch.Tens
     
     # Compute attention
     attn = einsum(weights, V, "... seq_len_q seq_len_kv, ... seq_len_kv d_v -> ... seq_len_q d_v")
-    # print("=== attn before rearrange ===", attn.shape)
-    # Rearrange to (batch_size, seq_len, h_q * d_v)
+    # # Rearrange to (batch_size, seq_len, h_q * d_v)
+    # if H_q > H_kv and H_kv > 1: # GQA
+    #     attn = rearrange(attn, "... h_kv r seq_len_q d_v -> ... seq_len_q (h_kv r d_v)")
+    # else: # MHA or MQA
+    #     attn = rearrange(attn, "... h_q seq_len_q d_v -> ... seq_len_q (h_q d_v)")
+    # Rearrange to (batch_size, h, seq_len, d_h)
     if H_q > H_kv and H_kv > 1: # GQA
-        attn = rearrange(attn, "... h_kv r seq_len_q d_v -> ... seq_len_q (h_kv r d_v)")
-    else: # MHA or MQA
-        attn = rearrange(attn, "... h_q seq_len_q d_v -> ... seq_len_q (h_q d_v)")
+        attn = rearrange(attn, "... h_kv r seq_len_q d_h -> ... h_q seq_len_q d_h")
+    # else: # MHA or MQA
+    #     attn = rearrange(attn, "... h_q seq_len_q d_v -> ... seq_len_q (h_q d_v)")
     return attn
 
 class MultiHeadSelfAttention(nn.Module):
@@ -131,7 +134,6 @@ class MultiHeadSelfAttention(nn.Module):
                 v = rearrange(v, "... seq_len (h d_v) -> ... h seq_len d_v", h = self.num_heads_kv)
                 self.kv_cache["v"][:, :, :seq_len,:] = v
                 self.curr_kv_len = seq_len
-                self.prefilled = True
             else:
                 pos = self.curr_kv_len
                 assert pos < self.max_len, "KV cache full"
@@ -166,7 +168,7 @@ class MultiHeadSelfAttention(nn.Module):
         # calculate token positions
         if hasattr(self, "kv_cache") and self.prefilled:
             assert x.shape[-2] == 1, "You don't need to provide the whole input after prefill"
-            token_positions_q = token_positions_kv = torch.tensor([self.curr_kv_len], dtype=torch.long, device=x.device)            
+            token_positions_q = token_positions_kv = torch.tensor([self.curr_kv_len], dtype=torch.long, device=x.device)
         else:
             seq_len = x.shape[-2]
             token_positions_q = token_positions_kv = torch.arange(seq_len, device=x.device)
@@ -177,15 +179,18 @@ class MultiHeadSelfAttention(nn.Module):
         
         # Create mask
         if is_masked:
-            mask = ~torch.triu(torch.full((q.shape[-2], k.shape[-2]), True, device = x.device), diagonal=1)
+            token_positions_kv = torch.arange(k.shape[-2], device=x.device)
+            mask = token_positions_q[:, None] >= token_positions_kv[None, :]
         else:
             mask = None
-        
+
          # Calculate scaled MHA
         scaled_mha = scaled_dot_product_attention(q, k, v, mask)
-        
+        scaled_mha = rearrange(scaled_mha, "... h_q seq_len_q d_v -> ... seq_len_q (h_q d_v)")
         # Project an output
         o = self.P_O(scaled_mha)
+        if hasattr(self, "kv_cache") and not self.prefilled:
+            self.prefilled = True
         return o
 
 class AbsorbedLinear(nn.Module):
@@ -228,7 +233,11 @@ class AbsorbedLinear(nn.Module):
     
     def forward(self, X: torch.Tensor) -> torch.Tensor:
         assert X.device == self.W.device
-        return einsum(X, self.W, "... seq_len d_in, h d_out d_in -> ... h seq_len d_out")
+        assert 3 <= len(X.size()) <= 4, f"Wrong input, x has {len(X.size())} dimensions"
+        if len(X.size()) == 3: 
+            return einsum(X, self.W, "... seq_len d_in, h d_out d_in -> ... h seq_len d_out")
+        else:
+            return einsum(X, self.W, "... h seq_len d_in, h d_out d_in -> ... h seq_len d_out")
 
 class MultiHeadLatentAttention(nn.Module):
     """
@@ -252,7 +261,7 @@ class MultiHeadLatentAttention(nn.Module):
         self.d_h = d_model // num_heads
         assert self.d_h % 2 == 0, "d_h must be divisible by 2"
         self.d_hr = self.d_h // 2
-
+        # print(f"===== num_heads={num_heads} d_model={self.d_model} d_latent={self.d_latent} | d_h={self.d_h} | d_hr={self.d_hr} =====")
         self.device = device
 
         # Init Projections
@@ -299,13 +308,14 @@ class MultiHeadLatentAttention(nn.Module):
 
         # Project x to latents
         c_Q = self.P_DQ(x) # (B x S x d_latent)
-    
+        # print("===== c_Q =====", c_Q.shape)
         # Content part
         if hasattr(self, "kv_cache"):
             q_C = self.P_KQ_absorbed(c_Q) # (batch_size, h, seq_len, d_latent) 
         else:
             q_C = self.P_UQ(c_Q) # (B, S, H * d_h)
             q_C = rearrange(q_C, "... seq_len (h d_h) -> ... h seq_len d_h", h = self.num_heads) # (batch_size, h, seq_len, d_h)
+        # print("===== q_C =====", q_C.shape)
 
         # RoPE part
         q_R = self.P_QR(c_Q) # (B, S, H * d_hr)
@@ -314,6 +324,7 @@ class MultiHeadLatentAttention(nn.Module):
             q_R = self.rope(q_R, token_positions = token_positions) # (batch_size, h, seq_len, d_hr)
 
         # Concatenate Q-content and Q-RoPE along feature dim
+        # print("===== q_C, q_R =====", q_C.shape, q_R.shape)
         q = torch.cat((q_C, q_R), dim = -1) # (batch_size, h, seq_len, d_h + d_hr) or (batch_size, h, seq_len, d_latent + d_hr)
         return q
 
@@ -348,9 +359,6 @@ class MultiHeadLatentAttention(nn.Module):
             if not self.prefilled:
                 self.kv_cache["c_KV"][:, :, :seq_len, :] = c_KV
                 self.kv_cache["k_R"][:, :, :seq_len, :] = k_R
-                                
-                # Change flag
-                self.prefilled = True
 
                 # Update current sequence length
                 self.curr_kv_len = seq_len
@@ -398,7 +406,7 @@ class MultiHeadLatentAttention(nn.Module):
 
     def forward(self, x: torch.Tensor, is_masked: bool = True):
         # calculate token positions
-        if hasattr(self, "kv_cache"):
+        if hasattr(self, "kv_cache") and self.prefilled:
             assert x.shape[-2] == 1, "You don't need to provide the whole input after prefill"
             token_positions_q = token_positions_kv = torch.tensor([self.curr_kv_len], dtype=torch.long, device=x.device)            
         else:
@@ -409,14 +417,26 @@ class MultiHeadLatentAttention(nn.Module):
         q = self.get_proj_q(x, token_positions_q)  # batch_size x h x seq_len x d_qk
         k, v_C = self.get_proj_kv(x, token_positions_kv)  # batch_size x h x seq_len x d_qk
 
+        # print("===== q, k, v =====", q.shape, k.shape, v_C.shape)
         # Create mask
-        mask = ~torch.triu(torch.full((q.shape[-2], k.shape[-2]), True, device = x.device), diagonal=1) if is_masked else None
-        
+        if is_masked:
+            token_positions_kv = torch.arange(k.shape[-2], device=x.device)
+            mask = token_positions_q[:, None] >= token_positions_kv[None, :]
+        else:
+            mask = None        
         # Calculate scaled DPA
         scaled_mha = scaled_dot_product_attention(q, k, v_C, mask)
-        # ("=======scaled_mha=========", scaled_mha.shape)
+        # print("===== scaled mha =====", scaled_mha.shape)
         # Project an output
-        final_proj = self.P_OV_absorbed if hasattr(self, "kv_cache") else self.P_O
-        # print("=======final_proj=========", final_proj.W.shape)
-        O = final_proj(scaled_mha)
-        return O
+        if hasattr(self, "kv_cache"):
+            # print(f"=== 1 {self.prefilled} ===")
+            o = self.P_OV_absorbed(scaled_mha)
+            o = einsum(o, "... h_q seq_len_q d_model -> ... seq_len_q d_model")
+        else:
+            # print(f"=== 2 {self.prefilled} ===")
+            scaled_mha = rearrange(scaled_mha, "... h_q seq_len_q d_v -> ... seq_len_q (h_q d_v)")
+            # Project an output
+            o = self.P_O(scaled_mha)
+        if hasattr(self, "kv_cache") and not self.prefilled:
+            self.prefilled = True
+        return o

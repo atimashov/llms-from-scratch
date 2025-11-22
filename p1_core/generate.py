@@ -48,7 +48,6 @@ class Generator:
         return tokenizer        
 
     def generate_next(self, tokens, tau: float = 1.0, topk: int | None = None):
-        # print("===tokens shape===", tokens.shape)
         pred = self.model(tokens, prob = True, tau = tau)[0, -1] # 
         # sample
         if topk is None:
