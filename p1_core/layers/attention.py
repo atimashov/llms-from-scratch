@@ -12,7 +12,7 @@ def scaled_dot_product_attention(Q: torch.Tensor, K: torch.Tensor, V: torch.Tens
     K:  (batch_size, ..., seq_len_kv, d_qk)
     V:  (batch_size, ..., seq_len_kv, d_v)
     """
-    print("========Q, K, V=========", Q.shape, K.shape, V.shape)
+    # print("========Q, K, V=========", Q.shape, K.shape, V.shape)
     d_qk = K.shape[-1]
     H_q, H_kv = Q.shape[1], K.shape[1]
     
@@ -35,7 +35,7 @@ def scaled_dot_product_attention(Q: torch.Tensor, K: torch.Tensor, V: torch.Tens
     
     # Compute attention
     attn = einsum(weights, V, "... seq_len_q seq_len_kv, ... seq_len_kv d_v -> ... seq_len_q d_v")
-    print("=== attn before rearrange ===", attn.shape)
+    # print("=== attn before rearrange ===", attn.shape)
     # Rearrange to (batch_size, seq_len, h_q * d_v)
     if H_q > H_kv and H_kv > 1: # GQA
         attn = rearrange(attn, "... h_kv r seq_len_q d_v -> ... seq_len_q (h_kv r d_v)")
@@ -164,7 +164,7 @@ class MultiHeadSelfAttention(nn.Module):
 
     def forward(self, x: torch.Tensor, is_masked: bool = True, with_rope = True, kv_cache = False):
         # calculate token positions
-        if hasattr(self, "kv_cache"):
+        if hasattr(self, "kv_cache") and self.prefilled:
             assert x.shape[-2] == 1, "You don't need to provide the whole input after prefill"
             token_positions_q = token_positions_kv = torch.tensor([self.curr_kv_len], dtype=torch.long, device=x.device)            
         else:
@@ -414,9 +414,9 @@ class MultiHeadLatentAttention(nn.Module):
         
         # Calculate scaled DPA
         scaled_mha = scaled_dot_product_attention(q, k, v_C, mask)
-        print("=======scaled_mha=========", scaled_mha.shape)
+        # ("=======scaled_mha=========", scaled_mha.shape)
         # Project an output
         final_proj = self.P_OV_absorbed if hasattr(self, "kv_cache") else self.P_O
-        print("=======final_proj=========", final_proj.W.shape)
+        # print("=======final_proj=========", final_proj.W.shape)
         O = final_proj(scaled_mha)
         return O

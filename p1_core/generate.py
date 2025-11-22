@@ -33,6 +33,7 @@ class Generator:
         self.model = self._init_model(model_params, model_path)
         self.cntx = self.model.context_length
         self.n_steps = config.get("max_num_tokens", float('inf'))
+        self.kv_cache = model_params["kv_cache"]
 
     def _init_model(self, model_params: dict, model_path: str):
         model = TransformerLM(**model_params)
@@ -47,6 +48,7 @@ class Generator:
         return tokenizer        
 
     def generate_next(self, tokens, tau: float = 1.0, topk: int | None = None):
+        # print("===tokens shape===", tokens.shape)
         pred = self.model(tokens, prob = True, tau = tau)[0, -1] # 
         # sample
         if topk is None:
@@ -60,9 +62,13 @@ class Generator:
         curr_pred = None
         step = 0 
         tokens_pred = []
-
-        while curr_pred != self.eof_token and step < self.n_steps:
-            curr_pred = self.generate_next(tokens, tau, topk)
+        prefill = True
+        while curr_pred != self.eof_token and step < self.n_steps - tokens.shape[-1]:
+            if not self.kv_cache or prefill:
+                curr_pred = self.generate_next(tokens, tau, topk)
+                prefill = False
+            else:
+                curr_pred = self.generate_next(tokens[:, -1:], tau, topk)
             add = torch.tensor([[curr_pred]]).to(device = self.device, dtype = torch.long)
             tokens = torch.cat((tokens[:,-(self.cntx - 1):], add), dim = 1) # TODO: probably can do more efficiently, for example pre-allocate memory
             step += 1
