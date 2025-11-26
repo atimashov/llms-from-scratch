@@ -2,7 +2,7 @@ seed: 123
 device: "cpu" #0 # currently no distributed training
 model:
   vocab_size: 10_000
-  context_length: 256 # 256 # 512
+  context_length: 256 # 512 # 64 # 128 # 
   d_model:  512 # 512   # ( 768 is a dimension used in many small Transformer papers)
   d_ff:  1344 # 1344 # 2016 # 3072 # 6144   ~8/3 d_model; 64x, which is good for GPU performance.
   activation: "SiLU"
@@ -10,10 +10,10 @@ model:
   rope_theta: 10_000
   num_layers: 4 # 4
   attention:
-    type: 'mla'
+    type: 'mqa'
     num_heads: 16
-    num_heads_kv: 4
-    d_latent: 128 # as usual 4 * d_h
+    num_heads_kv: 1
+    d_latent: 128 # 128 # as usual 4 * d_h
   dtype: 'amp'
   mixed_precision_dtype: 'bfloat16'
   inits:
@@ -26,11 +26,15 @@ model:
     residual: Null
     final: 'RMSNorm'
   weights_tying: false
-kv_cache: True
+kv_cache: False
 train:
-  # ckpt_load_from: "p1_core/checkpoints/wandb/TinyStoriesV2-GPT4/20251111_003420/ckpt_best.pt"
-  ckpt_load_from: "checkpoints/TinyStoriesV2-GPT4/wandb/20251121_012441/ckpt_best.pt"
+  ckpt_load_from: "checkpoints/TinyStoriesV2-GPT4/wandb/20251121_012441/ckpt_best.pt" # MLA 128
+  # ckpt_load_from: "checkpoints/TinyStoriesV2-GPT4/wandb/20251121_101349/ckpt_best.pt" # GQA-4
+  # ckpt_load_from: "checkpoints/TinyStoriesV2-GPT4/wandb/20251121_093540/ckpt_best.pt" # MHA
+  ckpt_load_from: "checkpoints/TinyStoriesV2-GPT4/wandb/20251121_105258/ckpt_best.pt" # MQA
+  # ckpt_load_from: "checkpoints/TinyStoriesV2-GPT4/wandb/20251121_114906/ckpt_best.pt" # GQA-2
+  # ckpt_load_from: "checkpoints/TinyStoriesV2-GPT4/wandb/20251121_120456/ckpt_best.pt" # MLA-64
 tokenizer:
   special_tokens: ["<|endoftext|>"]
   files_path: "~/ai_projects/data/TinyStoriesV2-GPT4" #-train"
-max_num_tokens: 300
+max_num_tokens: 150

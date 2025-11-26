@@ -17,14 +17,14 @@ def get_attention(
     if attn_type == "mla":
         attn = MultiHeadLatentAttention(
             d_model = d_model, d_latent = d_latent, num_heads = num_heads,  theta = theta, 
-            context_length = context_length, max_len = context_length, init_type = init_type,
-            clip_w = clip_w, device = device, dtype = dtype, kv_cache = kv_cache
+            context_length = context_length, init_type = init_type, clip_w = clip_w,
+            device = device, dtype = dtype, kv_cache = kv_cache
             )
     else:
         attn = MultiHeadSelfAttention(
             d_model = d_model, num_heads = num_heads, num_heads_kv = num_heads_kv, theta = theta,
-            context_length = context_length, max_len = context_length, init_type = init_type,
-            clip_w = clip_w, device = device, dtype = dtype, kv_cache = kv_cache
+            context_length = context_length, init_type = init_type, clip_w = clip_w,
+            device = device, dtype = dtype, kv_cache = kv_cache
             )
     return attn
     

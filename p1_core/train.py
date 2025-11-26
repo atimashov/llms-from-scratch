@@ -8,8 +8,7 @@ import yaml
 from argparse import ArgumentParser
 from pathlib import Path
 from termcolor import colored
-import os
-from time import perf_counter, sleep
+from time import perf_counter
 from datetime import datetime
 import numpy as np
 

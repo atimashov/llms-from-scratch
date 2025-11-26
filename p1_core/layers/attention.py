@@ -34,16 +34,9 @@ def scaled_dot_product_attention(Q: torch.Tensor, K: torch.Tensor, V: torch.Tens
     
     # Compute attention
     attn = einsum(weights, V, "... seq_len_q seq_len_kv, ... seq_len_kv d_v -> ... seq_len_q d_v")
-    # # Rearrange to (batch_size, seq_len, h_q * d_v)
-    # if H_q > H_kv and H_kv > 1: # GQA
-    #     attn = rearrange(attn, "... h_kv r seq_len_q d_v -> ... seq_len_q (h_kv r d_v)")
-    # else: # MHA or MQA
-    #     attn = rearrange(attn, "... h_q seq_len_q d_v -> ... seq_len_q (h_q d_v)")
-    # Rearrange to (batch_size, h, seq_len, d_h)
+    # Rearrange GQA to (B, H, S, d_h)
     if H_q > H_kv and H_kv > 1: # GQA
-        attn = rearrange(attn, "... h_kv r seq_len_q d_h -> ... h_q seq_len_q d_h")
-    # else: # MHA or MQA
-    #     attn = rearrange(attn, "... h_q seq_len_q d_v -> ... seq_len_q (h_q d_v)")
+        attn = rearrange(attn, "... h_kv r seq_len_q d_h -> ... (h_kv r) seq_len_q d_h")
     return attn
 
 class MultiHeadSelfAttention(nn.Module):
@@ -53,7 +46,7 @@ class MultiHeadSelfAttention(nn.Module):
     """
     def __init__(
         self, d_model: int, num_heads: int, num_heads_kv: int = 1, theta: float = 10000.0, 
-        context_length = 10000, max_len = 10000, init_type: str = 'xavier', clip_w: float = 3.0,
+        context_length = 10000, init_type: str = 'xavier', clip_w: float = 3.0,
         device: torch.device | None = None, dtype: torch.dtype | None = None, kv_cache: bool = False
         ):
         super().__init__()
@@ -61,7 +54,7 @@ class MultiHeadSelfAttention(nn.Module):
         assert num_heads % num_heads_kv == 0, "'num_heads' should be divisible by 'num_heads_kv'"
         self.num_heads_q = num_heads # queries
         self.num_heads_kv = num_heads_kv   # keys & values
-        self.max_len = max_len
+        self.cntx = context_length
         self.d_model = d_model
         self.d_qk = d_model // num_heads
         self.d_v = d_model // num_heads
@@ -78,11 +71,9 @@ class MultiHeadSelfAttention(nn.Module):
         # Init KV Cache
         if kv_cache:
             with torch.no_grad():
-                self.kv_cache = {
-                    "k": torch.zeros((1, self.num_heads_kv, self.max_len, self.d_qk), device = device, dtype = dtype),
-                    "v": torch.zeros((1, self.num_heads_kv, self.max_len, self.d_v), device = device, dtype = dtype),
-                }
-            self.prefilled = False
+                self.k_cache = torch.zeros((1, self.num_heads_kv, self.cntx, self.d_qk), device = device, dtype = dtype)
+                self.v_cache = torch.zeros((1, self.num_heads_kv, self.cntx, self.d_v), device = device, dtype = dtype)
+            self.start, self.kv_len = 0, 0
 
     def get_proj_q(self, x: torch.Tensor, with_rope: bool = True, token_positions: torch.Tensor | None = None):
         """
@@ -90,7 +81,7 @@ class MultiHeadSelfAttention(nn.Module):
         if KV cache is enabled, it is expected taht sequence length is 1.
 
         Args:
-            x:  (batch_size, seq_len, d_model)
+            x:  (B, S, d_model)
 
         Returns:
             Q: (batch_size, num_heads, seq_len, d_qk) or (batch_size, num_heads, 1, d_qk)
@@ -98,7 +89,7 @@ class MultiHeadSelfAttention(nn.Module):
         q = self.P_Q(x)
         q = rearrange(q, "... seq_len (h d_qk) -> ... h seq_len d_qk", h = self.num_heads_q)
         
-        if with_rope and self.rope is not None: # TODO: deal with token_positions
+        if with_rope and self.rope is not None:
             q = self.rope(q, token_positions = token_positions)
         return q
     
@@ -111,64 +102,79 @@ class MultiHeadSelfAttention(nn.Module):
         and returns the prefix up to seq_len.
 
         Args:
-            x:  (batch_size, seq_len, d_model)
+            x:  (B, S, d_model)
             name: 'K' or 'V'
 
         Returns:
-            out: (batch_size, h, seq_len, d_proj)
+            out: (B, H, S, d_proj)
         """
-        if hasattr(self, "kv_cache"):
-            batch_size, seq_len, _ = x.shape
-            assert seq_len <= self.max_len, "Exceeded max_len of KV cache"
+        batch_size, seq_len, _ = x.shape
+        
+        # truncate sequence length
+        if seq_len > self.cntx:
+            x = x[:, -self.cntx:, :]
+        
+        if hasattr(self, "k_cache"):
             assert batch_size == 1, f"Currently support batch_size = 1, but provided {batch_size}"
             
             # populate KV Cache (NOTE: for now it works only for batch_size = 1)
-            if not self.prefilled:
+            if self.kv_len == 0:
                 k = self.P_K(x)  # batch_size x seq_len x (h d_qk)
                 k = rearrange(k, "... seq_len (h d_qk) -> ... h seq_len d_qk", h = self.num_heads_kv)
+                self.k_cache[:, :, :seq_len,:] = k
                 if with_rope and self.rope is not None:
                     k = self.rope(k, token_positions = token_positions)
-                self.kv_cache["k"][:, :, :seq_len,:] = k
-            
+                
                 v = self.P_V(x)  # batch_size x seq_len x (h d_v)
                 v = rearrange(v, "... seq_len (h d_v) -> ... h seq_len d_v", h = self.num_heads_kv)
-                self.kv_cache["v"][:, :, :seq_len,:] = v
-                self.curr_kv_len = seq_len
+                self.v_cache[:, :, :seq_len,:] = v
+                self.kv_len = seq_len
             else:
-                pos = self.curr_kv_len
-                assert pos < self.max_len, "KV cache full"
-                assert x.shape[-2] == 1, "You don't need to provide the whole input after prefill"
+                assert seq_len == 1, "You don't need to provide the whole input after prefill"
 
-                k_new = self.P_K(x) # batch_size x 1 x (h d_qk)
-                k_new = rearrange(k_new, "... seq_len (h d_qk) -> ... h seq_len d_qk", h = self.num_heads_kv) # batch_size x num_heads x 1 x d_qk
+                # 1) choose write position + update ring pointers
+                if self.kv_len < self.cntx:
+                    pos = self.kv_len              # append at end
+                    self.kv_len += 1
+                else:
+                    pos = self.start               # overwrite oldest
+                    self.start = (self.start + 1) % self.cntx
+
+                # 2) write new K/V
+                k_new = self.P_K(x)
+                k_new = rearrange(k_new, "... seq_len (h d_qk) -> ... h seq_len d_qk", h=self.num_heads_kv)
+                self.k_cache[:, :, pos:pos+1, :] = k_new
+
+                v_new = self.P_V(x)
+                v_new = rearrange(v_new, "... seq_len (h d_v) -> ... h seq_len d_v", h=self.num_heads_kv)
+                self.v_cache[:, :, pos:pos+1, :] = v_new
+
+                # 3) read logical window (oldest -> newest)
+                idx = (self.start + torch.arange(self.kv_len, device=x.device)) % self.cntx
+                k = self.k_cache[:, :, idx, :]
+                v = self.v_cache[:, :, idx, :]
+
+                # 4) apply RoPE to the logical window
                 if with_rope and self.rope is not None:
-                    k_new = self.rope(k_new, token_positions = token_positions)
-                self.kv_cache["k"][:, :, pos:pos+1,:] = k_new
-
-                v_new = self.P_V(x) # batch_size x 1 x (h d_v)
-                v_new = rearrange(v_new, "... seq_len (h d_v) -> ... h seq_len d_v", h = self.num_heads_kv) # batch_size x num_heads x 1 x d_v
-                self.kv_cache["v"][:, :, pos:pos+1,:] = v_new
-                
-                self.curr_kv_len += 1
-                with torch.no_grad():
-                    k = self.kv_cache["k"][:,:,:self.curr_kv_len,:]
-                    v = self.kv_cache["v"][:,:,:self.curr_kv_len,:]
+                    k = self.rope(k, token_positions=token_positions)
         else:
-            k = self.P_K(x)  # batch_size x seq_len x (h d_qk)
+            k = self.P_K(x)  # (B, S, H * d_qk)
             k = rearrange(k, "... seq_len (h d_qk) -> ... h seq_len d_qk", h = self.num_heads_kv)
             if with_rope and self.rope is not None:
                 k = self.rope(k, token_positions = token_positions)
 
-            v = self.P_V(x)  # batch_size x seq_len x (h d_v)
+            v = self.P_V(x)  # (B, S, H * d_v)
             v = rearrange(v, "... seq_len (h d_v) -> ... h seq_len d_v", h = self.num_heads_kv)
         
         return k, v
 
     def forward(self, x: torch.Tensor, is_masked: bool = True, with_rope = True, kv_cache = False):
-        # calculate token positions
-        if hasattr(self, "kv_cache") and self.prefilled:
+        # Calculate token positions
+        if hasattr(self, "k_cache") and self.kv_len > 0:
             assert x.shape[-2] == 1, "You don't need to provide the whole input after prefill"
-            token_positions_q = token_positions_kv = torch.tensor([self.curr_kv_len], dtype=torch.long, device=x.device)
+            seq_len = min(self.cntx, self.kv_len + 1)
+            token_positions_q = torch.tensor([seq_len - 1], dtype=torch.long, device=x.device)
+            token_positions_kv = torch.arange(seq_len, device=x.device)
         else:
             seq_len = x.shape[-2]
             token_positions_q = token_positions_kv = torch.arange(seq_len, device=x.device)
@@ -176,21 +182,19 @@ class MultiHeadSelfAttention(nn.Module):
         # Project x to get queries (Q), keys (K) and values
         q = self.get_proj_q(x, with_rope, token_positions_q)  # batch_size x h x seq_len x d_qk  or batch_size x 1 x d_qk (KV cache)
         k, v = self.get_proj_kv(x, with_rope, token_positions_kv)  # batch_size x h x seq_len x d_qk
-        
+
         # Create mask
         if is_masked:
-            token_positions_kv = torch.arange(k.shape[-2], device=x.device)
             mask = token_positions_q[:, None] >= token_positions_kv[None, :]
         else:
             mask = None
 
-         # Calculate scaled MHA
+        # Calculate scaled MHA
         scaled_mha = scaled_dot_product_attention(q, k, v, mask)
         scaled_mha = rearrange(scaled_mha, "... h_q seq_len_q d_v -> ... seq_len_q (h_q d_v)")
+        
         # Project an output
         o = self.P_O(scaled_mha)
-        if hasattr(self, "kv_cache") and not self.prefilled:
-            self.prefilled = True
         return o
 
 class AbsorbedLinear(nn.Module):
@@ -248,20 +252,19 @@ class MultiHeadLatentAttention(nn.Module):
         ...
     """
     def __init__(
-        self, d_model: int, d_latent: int, num_heads: int, theta: float = 10000.0, context_length = 10000, max_len = 10000,
+        self, d_model: int, d_latent: int, num_heads: int, theta: float = 10000.0, context_length = 10000, 
         init_type: str = 'xavier', clip_w: float = 3.0, device: torch.device | None = None, dtype: torch.dtype | None = None,
         kv_cache: bool = False
         ):
         super().__init__()
         assert d_model % num_heads == 0, "d_model must be divisible by num_heads"
         self.num_heads = num_heads
-        self.max_len = max_len
+        self.cntx = context_length
         self.d_model = d_model
         self.d_latent = d_latent        
         self.d_h = d_model // num_heads
         assert self.d_h % 2 == 0, "d_h must be divisible by 2"
         self.d_hr = self.d_h // 2
-        # print(f"===== num_heads={num_heads} d_model={self.d_model} d_latent={self.d_latent} | d_h={self.d_h} | d_hr={self.d_hr} =====")
         self.device = device
 
         # Init Projections
@@ -284,10 +287,10 @@ class MultiHeadLatentAttention(nn.Module):
             # Init KV Cache
             with torch.no_grad():
                 self.kv_cache = {
-                    "c_KV": torch.zeros((1, 1, self.max_len, self.d_latent), device = device, dtype = dtype),
-                    "k_R": torch.zeros((1, 1, self.max_len, self.d_hr), device = device, dtype = dtype),
+                    "c_KV": torch.zeros((1, 1, self.cntx, self.d_latent), device = device, dtype = dtype),
+                    "k_R": torch.zeros((1, 1, self.cntx, self.d_hr), device = device, dtype = dtype),
                 }
-            self.prefilled = False
+            self.start, self.kv_len = 0, 0
 
     def get_proj_q(self, x: torch.Tensor, token_positions: torch.Tensor | None = None):
         """
@@ -295,7 +298,7 @@ class MultiHeadLatentAttention(nn.Module):
         if KV cache is enabled, it is expected that sequence length is 1.
         
         Args:
-            x:  (batch_size, seq_len, d_model)
+            x:  (B, S, d_model)
         
         Returns:
             q: (B, H, S, d_qc + d_qr)
@@ -307,25 +310,23 @@ class MultiHeadLatentAttention(nn.Module):
             self.P_OV_absorbed = AbsorbedLinear([self.P_UV.W, self.P_O.W], self.num_heads)
 
         # Project x to latents
-        c_Q = self.P_DQ(x) # (B x S x d_latent)
-        # print("===== c_Q =====", c_Q.shape)
+        c_Q = self.P_DQ(x) # (B,  S,  d_latent)
+
         # Content part
         if hasattr(self, "kv_cache"):
-            q_C = self.P_KQ_absorbed(c_Q) # (batch_size, h, seq_len, d_latent) 
+            q_C = self.P_KQ_absorbed(c_Q) # (B, H, S, d_latent) 
         else:
             q_C = self.P_UQ(c_Q) # (B, S, H * d_h)
-            q_C = rearrange(q_C, "... seq_len (h d_h) -> ... h seq_len d_h", h = self.num_heads) # (batch_size, h, seq_len, d_h)
-        # print("===== q_C =====", q_C.shape)
+            q_C = rearrange(q_C, "... seq_len (h d_h) -> ... h seq_len d_h", h = self.num_heads) # (B, H, S, d_h)
 
         # RoPE part
         q_R = self.P_QR(c_Q) # (B, S, H * d_hr)
-        q_R = rearrange(q_R, "... seq_len (h d_hr) -> ... h seq_len d_hr", h = self.num_heads) # (batch_size, h, seq_len, d_hr)
+        q_R = rearrange(q_R, "... seq_len (h d_hr) -> ... h seq_len d_hr", h = self.num_heads) # (B, H, S, d_hr)
         if getattr(self, "rope", None) is not None and q_R.size(-1) > 0:
-            q_R = self.rope(q_R, token_positions = token_positions) # (batch_size, h, seq_len, d_hr)
+            q_R = self.rope(q_R, token_positions = token_positions) # (B, H, S, d_hr)
 
         # Concatenate Q-content and Q-RoPE along feature dim
-        # print("===== q_C, q_R =====", q_C.shape, q_R.shape)
-        q = torch.cat((q_C, q_R), dim = -1) # (batch_size, h, seq_len, d_h + d_hr) or (batch_size, h, seq_len, d_latent + d_hr)
+        q = torch.cat((q_C, q_R), dim = -1) # (B, H, S, d_h + d_hr) or (B, H, S, d_latent + d_hr)
         return q
 
     def get_proj_kv(self, x: torch.Tensor, token_positions: torch.Tensor | None = None):
@@ -333,82 +334,96 @@ class MultiHeadLatentAttention(nn.Module):
         Compute and (optionally) update K/V cache.
         
         Args:
-            x:  (batch_size, seq_len, d_model)
+            x:  (B, S, d_model)
             token_positions:
 
         Returns:
             k / [c_kv, r_K]: (batch_size, h_or_1, seq_len, d_proj)
             v / c_KV: (batch_size, h_or_1, seq_len, d_proj)
         """
+        batch_size, seq_len, _ = x.shape
+        
+        # truncate sequence length
+        if seq_len > self.cntx:
+            x = x[:, -self.cntx:, :]
+        
         if hasattr(self, "kv_cache"):
-            batch_size, seq_len, _ = x.shape
-            assert seq_len <= self.max_len, "Exceeded max_len of KV cache"
             assert batch_size == 1, f"Currently support batch_size = 1, but provided {batch_size}"
             
             # 1. Project x to latent space
-            c_KV = self.P_DKV(x) # (batch_size, seq_len, d_latent)
-            c_KV = c_KV.unsqueeze(1) # (batch_size, 1, seq_len, d_latent)
+            c_KV = self.P_DKV(x) # (B, S, d_latent)
+            c_KV = c_KV.unsqueeze(1) # (B, 1, S, d_latent)
 
             # 2. Project x to RoPE part
-            k_R = self.P_KR(x) # batch_size x seq_len x d_hr
-            if getattr(self, "rope", None) is not None and k_R.size(-1) > 0:
-                k_R = self.rope(k_R, token_positions = token_positions) # batch_size x seq_len x d_hr            
+            k_R = self.P_KR(x) # (B, S, d_hr)            
             k_R = k_R.unsqueeze(1) # (B, 1, S, d_hr)
 
             # 3. populate KV Cache
-            if not self.prefilled:
+            if self.kv_len == 0:
                 self.kv_cache["c_KV"][:, :, :seq_len, :] = c_KV
                 self.kv_cache["k_R"][:, :, :seq_len, :] = k_R
 
                 # Update current sequence length
-                self.curr_kv_len = seq_len
+                self.kv_len = seq_len
             else:
-                pos = self.curr_kv_len
-                assert pos < self.max_len, "KV cache full"
-                assert x.shape[-2] == 1, "You don't need to provide the whole input after prefill"
+                assert seq_len == 1, "You don't need to provide the whole input after prefill"
 
+                # 1) choose write position + update ring pointers
+                if self.kv_len < self.cntx:
+                    pos = self.kv_len # append at end
+                    self.kv_len += 1
+                else:
+                    pos = self.start # overwrite oldest
+                    self.start = (self.start + 1) % self.cntx
+                
+                # 2) write new K/V
                 self.kv_cache["c_KV"][:, :, pos:pos+1, :] = c_KV
                 self.kv_cache["k_R"][:, :, pos:pos+1, :] = k_R
 
-                # Update current sequence length
-                self.curr_kv_len += 1
+                # 3) read logical window (oldest -> newest)
+                idx = (self.start + torch.arange(self.kv_len, device=x.device)) % self.cntx
+                c_KV = self.kv_cache["c_KV"][:, :, idx, :]
+                k_R = self.kv_cache["k_R"][:, :, idx, :]
 
-            c_KV = self.kv_cache["c_KV"][:, :, :self.curr_kv_len, :] # (batch_size, 1, seq_len, d_latent)
-            k_R = self.kv_cache["k_R"][:, :, :self.curr_kv_len, :] # (batch_size, 1, seq_len, d_hr)
+            # 4) apply RoPE to the logical window            
+            if getattr(self, "rope", None) is not None and k_R.size(-1) > 0:
+                k_R = self.rope(k_R, token_positions = token_positions) # batch_size x seq_len x d_hr
 
             # Concatenate k (latent content and RoPE)
             k = torch.cat((c_KV, k_R), dim = -1) # (batch_size, 1, seq_len, d_latent + d_hr) 
             v_C = c_KV # (batch_size, 1, seq_len, d_latent)
         else:
             # Project x to latents
-            c_KV = self.P_DKV(x) # (batch_size, seq_len, d_latent)
+            c_KV = self.P_DKV(x) # (B, S, d_latent)
 
             # RoPE part for K
-            k_R = self.P_KR(x) # (batch_size, seq_len, d_hr)
+            k_R = self.P_KR(x) # (B, S, d_hr)
             if getattr(self, "rope", None) is not None and k_R.size(-1) > 0:
-                k_R = self.rope(k_R, token_positions = token_positions) # (batch_size, seq_len, d_hr)
+                k_R = self.rope(k_R, token_positions = token_positions) # (B, S, d_hr)
             
             # Broadcast single-head k_R across heads
             k_R = k_R.unsqueeze(1) # (batch_size, 1, seq_len, d_hr)
             
             # 4. calculate necessary projections
-            k_C = self.P_UK(c_KV) # (batch_size, seq_len, h * d_h)
-            k_C = rearrange(k_C, "... seq_len (h d_h) -> ... h seq_len d_h", h = self.num_heads) # (batch_size, h, seq_len, d_h)
+            k_C = self.P_UK(c_KV) # (B, S, H * d_h)
+            k_C = rearrange(k_C, "... seq_len (h d_h) -> ... h seq_len d_h", h = self.num_heads) # (B, H, S, d_h)
 
-            k_R = k_R.expand(-1, self.num_heads, -1, -1) # (batch_size, h, seq_len, d_hr)
+            k_R = k_R.expand(-1, self.num_heads, -1, -1) # (B, H, S, d_hr)
 
             # Concatenate k
-            k = torch.cat((k_C, k_R), dim = -1) # (batch_size, h, seq_len, d_h + d_hr)
+            k = torch.cat((k_C, k_R), dim = -1) # (B, H, S, d_h + d_hr)
 
-            v_C = self.P_UV(c_KV) # (batch_size, seq_len, h * d_h)
-            v_C = rearrange(v_C, "... seq_len (h d_h) -> ... h seq_len d_h", h = self.num_heads) # (batch_size, h, seq_len, d_h)
+            v_C = self.P_UV(c_KV) # (B, S, H * d_h)
+            v_C = rearrange(v_C, "... seq_len (h d_h) -> ... h seq_len d_h", h = self.num_heads) # (B, H, S, d_h)
         return k, v_C
 
     def forward(self, x: torch.Tensor, is_masked: bool = True):
         # calculate token positions
-        if hasattr(self, "kv_cache") and self.prefilled:
+        if hasattr(self, "kv_cache") and self.kv_len > 0:
             assert x.shape[-2] == 1, "You don't need to provide the whole input after prefill"
-            token_positions_q = token_positions_kv = torch.tensor([self.curr_kv_len], dtype=torch.long, device=x.device)            
+            seq_len = min(self.cntx, self.kv_len + 1)
+            token_positions_q = torch.tensor([seq_len - 1], dtype=torch.long, device=x.device)
+            token_positions_kv = torch.arange(seq_len, device=x.device)
         else:
             seq_len = x.shape[-2]
             token_positions_q = token_positions_kv = torch.arange(seq_len, device=x.device)
@@ -417,26 +432,20 @@ class MultiHeadLatentAttention(nn.Module):
         q = self.get_proj_q(x, token_positions_q)  # batch_size x h x seq_len x d_qk
         k, v_C = self.get_proj_kv(x, token_positions_kv)  # batch_size x h x seq_len x d_qk
 
-        # print("===== q, k, v =====", q.shape, k.shape, v_C.shape)
         # Create mask
         if is_masked:
-            token_positions_kv = torch.arange(k.shape[-2], device=x.device)
             mask = token_positions_q[:, None] >= token_positions_kv[None, :]
         else:
             mask = None        
-        # Calculate scaled DPA
+        
+        # Calculate scaled MHA
         scaled_mha = scaled_dot_product_attention(q, k, v_C, mask)
-        # print("===== scaled mha =====", scaled_mha.shape)
+
         # Project an output
         if hasattr(self, "kv_cache"):
-            # print(f"=== 1 {self.prefilled} ===")
             o = self.P_OV_absorbed(scaled_mha)
             o = einsum(o, "... h_q seq_len_q d_model -> ... seq_len_q d_model")
         else:
-            # print(f"=== 2 {self.prefilled} ===")
             scaled_mha = rearrange(scaled_mha, "... h_q seq_len_q d_v -> ... seq_len_q (h_q d_v)")
-            # Project an output
             o = self.P_O(scaled_mha)
-        if hasattr(self, "kv_cache") and not self.prefilled:
-            self.prefilled = True
         return o
