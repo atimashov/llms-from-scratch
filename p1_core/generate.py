@@ -87,6 +87,8 @@ class Generator:
             step += 1
 
             if hasattr(self, "benchmark_gen"):
+                if torch.cuda.is_available():
+                    torch.cuda.synchronize()
                 self.benchmark_gen.append(1000.0 * (perf_counter() - t))
 
         return tokens_pred
@@ -94,8 +96,17 @@ class Generator:
     def generate(self, prompt: str, tau: float = 1.0, topk: int | None = None):
         # encode
         assert len(prompt) > 0, "We expect some prompt, but you entered nothing."
+        if hasattr(self, "benchmark_gen"):
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+            t = perf_counter()
         tokens_list = self.tokenizer.encode_prev(prompt)
-        
+        t_enc = None
+        if hasattr(self, "benchmark_gen"):
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+            t_enc = 1000.0 * (perf_counter() - t)
+
         # truncate prompt & convert it to torch
         tokens = torch.as_tensor(tokens_list[-self.cntx:], device = self.device, dtype = torch.long)
 
@@ -108,9 +119,20 @@ class Generator:
             tokens = torch.cat([tokens, pad], dim=1)
         # generate
         tokens_pred = self.generate_tokens(tokens, S % self.cntx, tau, topk)
-        # print([(i, t) for i, t in enumerate(tokens_pred)])
+
         # decode TODO: modify to decode on the fly
-        return self.tokenizer.decode(tokens_pred), len(tokens_pred)
+        if hasattr(self, "benchmark_gen"):
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+            t = perf_counter()
+        text = self.tokenizer.decode(tokens_pred)
+        t_dec = None
+        if hasattr(self, "benchmark_gen"):
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+            t_dec = 1000.0 * (perf_counter() - t)
+
+        return t_enc, t_dec, text, len(tokens_pred)
 
 if __name__ == '__main__':
     seed = 123
@@ -139,21 +161,39 @@ if __name__ == '__main__':
         f"{colored('Context length: ', 'blue', attrs=["bold"])}{config['model']['context_length']} | "
         f"{colored('KV-cache: ', 'blue', attrs=["bold"])}{config['kv_cache']}"
     )
-    
+    if inputs.benchmark:
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+        t = perf_counter()
     gen = Generator(config, benchmark = inputs.benchmark)
-    t = perf_counter()
-    output, num_tokens = gen.generate(inputs.prompt, tau = inputs.tau, topk=inputs.topk)
-    t = perf_counter() - t
+    if inputs.benchmark:
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+        t_init = 1000.0 * (perf_counter() - t)
+        t = perf_counter()
+    
+    t_enc, t_dec, output, num_tokens = gen.generate(inputs.prompt, tau = inputs.tau, topk=inputs.topk)
+    
+    if inputs.benchmark:
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+        t_gen = 1000.0 * (perf_counter() - t)
+
     print(f"{colored('Generated', 'blue', attrs=["bold"])} {num_tokens} {colored('tokens', 'blue', attrs=["bold"])}")
     print(colored("*" * 100, 'blue', attrs=["bold"]))
     print(f"{colored('Prompt:\n', 'blue', attrs=["bold"])}{inputs.prompt}")
     print(colored("-" * 100, 'blue', attrs=["bold"]))
     print(f"{colored('Generation:\n', 'blue', attrs=["bold"])}{output}")
     print(colored("*" * 100, 'blue', attrs=["bold"]))
-    print(f"{colored('⏱️ Generation time:', 'red', attrs=["bold"])}{t:.2f}s")
+
     if inputs.benchmark:
+        print(f"{colored('⏱️ Init time: ', 'red', attrs=["bold"])}{t_init:.2f} ms.")
+        print(f"{colored('⏱️ Encoding time: ', 'red', attrs=["bold"])}{t_enc:.2f} ms.")
+        print(f"{colored('⏱️ Generation time: ', 'red', attrs=["bold"])}{sum(gen.benchmark_gen):.2f} ms.")
+        print(f"{colored('⏱️ Decoding time: ', 'red', attrs=["bold"])}{t_dec:.2f} ms.")
         mean_time = sum(gen.benchmark_gen[5:]) / len(gen.benchmark_gen[5:])
-        print(f"Average generation (after 5 steps): {mean_time:.2f} ms.")
-        print(f"First 10 steps: {[round(x, 2) for x in gen.benchmark_gen[:10]]}")
+        print(f"{colored('⏱️ Average generation (after 5 steps): ', 'red', attrs=["bold"])}{mean_time:.2f} ms.")
+        print(f"{colored('⏱️ First 10 steps: ', 'red', attrs=["bold"])}{[round(x, 2) for x in gen.benchmark_gen[:10]]}")
+        print([round(x, 2) for x in gen.benchmark_gen])
         print()
         

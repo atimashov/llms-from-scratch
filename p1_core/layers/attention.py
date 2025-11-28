@@ -70,10 +70,17 @@ class MultiHeadSelfAttention(nn.Module):
     
         # Init KV Cache
         if kv_cache:
-            with torch.no_grad():
-                self.k_cache = torch.zeros((1, self.num_heads_kv, self.cntx, self.d_qk), device = device, dtype = dtype)
-                self.v_cache = torch.zeros((1, self.num_heads_kv, self.cntx, self.d_v), device = device, dtype = dtype)
-            self.start, self.kv_len = 0, 0
+            self.register_buffer(
+                "cache_k",
+                torch.empty((1, self.num_heads_kv, self.cntx, self.d_qk), device = device, dtype = dtype),
+                persistent = False
+            )
+            self.register_buffer(
+                "cache_v",
+                torch.empty((1, self.num_heads_kv, self.cntx, self.d_v), device = device, dtype = dtype),
+                persistent = False
+            )
+            self.start, self.kv_cache_len = 0, 0
 
     def get_proj_q(self, x: torch.Tensor, with_rope: bool = True, token_positions: torch.Tensor | None = None):
         """
@@ -114,28 +121,28 @@ class MultiHeadSelfAttention(nn.Module):
         if seq_len > self.cntx:
             x = x[:, -self.cntx:, :]
         
-        if hasattr(self, "k_cache"):
+        if hasattr(self, "kv_cache_len"):
             assert batch_size == 1, f"Currently support batch_size = 1, but provided {batch_size}"
             
             # populate KV Cache (NOTE: for now it works only for batch_size = 1)
-            if self.kv_len == 0:
+            if self.kv_cache_len == 0:
                 k = self.P_K(x)  # batch_size x seq_len x (h d_qk)
                 k = rearrange(k, "... seq_len (h d_qk) -> ... h seq_len d_qk", h = self.num_heads_kv)
-                self.k_cache[:, :, :seq_len,:] = k
+                self.cache_k[:, :, :seq_len,:] = k
                 if with_rope and self.rope is not None:
                     k = self.rope(k, token_positions = token_positions)
                 
                 v = self.P_V(x)  # batch_size x seq_len x (h d_v)
                 v = rearrange(v, "... seq_len (h d_v) -> ... h seq_len d_v", h = self.num_heads_kv)
-                self.v_cache[:, :, :seq_len,:] = v
-                self.kv_len = seq_len
+                self.cache_v[:, :, :seq_len,:] = v
+                self.kv_cache_len = seq_len
             else:
                 assert seq_len == 1, "You don't need to provide the whole input after prefill"
 
                 # 1) choose write position + update ring pointers
-                if self.kv_len < self.cntx:
-                    pos = self.kv_len              # append at end
-                    self.kv_len += 1
+                if self.kv_cache_len < self.cntx:
+                    pos = self.kv_cache_len              # append at end
+                    self.kv_cache_len += 1
                 else:
                     pos = self.start               # overwrite oldest
                     self.start = (self.start + 1) % self.cntx
@@ -143,16 +150,16 @@ class MultiHeadSelfAttention(nn.Module):
                 # 2) write new K/V
                 k_new = self.P_K(x)
                 k_new = rearrange(k_new, "... seq_len (h d_qk) -> ... h seq_len d_qk", h=self.num_heads_kv)
-                self.k_cache[:, :, pos:pos+1, :] = k_new
+                self.cache_k[:, :, pos:pos+1, :] = k_new
 
                 v_new = self.P_V(x)
                 v_new = rearrange(v_new, "... seq_len (h d_v) -> ... h seq_len d_v", h=self.num_heads_kv)
-                self.v_cache[:, :, pos:pos+1, :] = v_new
+                self.cache_v[:, :, pos:pos+1, :] = v_new
 
                 # 3) read logical window (oldest -> newest)
-                idx = (self.start + torch.arange(self.kv_len, device=x.device)) % self.cntx
-                k = self.k_cache[:, :, idx, :]
-                v = self.v_cache[:, :, idx, :]
+                idx = (self.start + torch.arange(self.kv_cache_len, device=x.device)) % self.cntx
+                k = self.cache_k[:, :, idx, :]
+                v = self.cache_v[:, :, idx, :]
 
                 # 4) apply RoPE to the logical window
                 if with_rope and self.rope is not None:
@@ -170,9 +177,9 @@ class MultiHeadSelfAttention(nn.Module):
 
     def forward(self, x: torch.Tensor, is_masked: bool = True, with_rope = True, kv_cache = False):
         # Calculate token positions
-        if hasattr(self, "k_cache") and self.kv_len > 0:
+        if hasattr(self, "kv_cache_len") and self.kv_cache_len > 0:
             assert x.shape[-2] == 1, "You don't need to provide the whole input after prefill"
-            seq_len = min(self.cntx, self.kv_len + 1)
+            seq_len = min(self.cntx, self.kv_cache_len + 1)
             token_positions_q = torch.tensor([seq_len - 1], dtype=torch.long, device=x.device)
             token_positions_kv = torch.arange(seq_len, device=x.device)
         else:
@@ -285,12 +292,17 @@ class MultiHeadLatentAttention(nn.Module):
     
         if kv_cache:
             # Init KV Cache
-            with torch.no_grad():
-                self.kv_cache = {
-                    "c_KV": torch.zeros((1, 1, self.cntx, self.d_latent), device = device, dtype = dtype),
-                    "k_R": torch.zeros((1, 1, self.cntx, self.d_hr), device = device, dtype = dtype),
-                }
-            self.start, self.kv_len = 0, 0
+            self.register_buffer(
+                "cache_c_KV",
+                torch.empty((1, 1, self.cntx, self.d_latent), device = device, dtype = dtype),
+                persistent = False
+            )
+            self.register_buffer(
+                "cache_k_R",
+                torch.empty((1, 1, self.cntx, self.d_hr), device = device, dtype = dtype),
+                persistent = False
+            )
+            self.start, self.kv_cache_len = 0, 0
 
     def get_proj_q(self, x: torch.Tensor, token_positions: torch.Tensor | None = None):
         """
@@ -304,8 +316,8 @@ class MultiHeadLatentAttention(nn.Module):
             q: (B, H, S, d_qc + d_qr)
         """
 
-        # Absorb matrices if KV
-        if hasattr(self, "kv_cache") and not hasattr(self, "P_KQ_absorbed"):
+        # # Absorb matrices if KV
+        if hasattr(self, "kv_cache_len") and not hasattr(self, "P_KQ_absorbed"):
             self.P_KQ_absorbed = AbsorbedLinear([self.P_UQ.W, self.P_UK.W.T], self.num_heads)
             self.P_OV_absorbed = AbsorbedLinear([self.P_UV.W, self.P_O.W], self.num_heads)
 
@@ -313,7 +325,7 @@ class MultiHeadLatentAttention(nn.Module):
         c_Q = self.P_DQ(x) # (B,  S,  d_latent)
 
         # Content part
-        if hasattr(self, "kv_cache"):
+        if hasattr(self, "kv_cache_len"):
             q_C = self.P_KQ_absorbed(c_Q) # (B, H, S, d_latent) 
         else:
             q_C = self.P_UQ(c_Q) # (B, S, H * d_h)
@@ -347,7 +359,7 @@ class MultiHeadLatentAttention(nn.Module):
         if seq_len > self.cntx:
             x = x[:, -self.cntx:, :]
         
-        if hasattr(self, "kv_cache"):
+        if hasattr(self, "kv_cache_len"):
             assert batch_size == 1, f"Currently support batch_size = 1, but provided {batch_size}"
             
             # 1. Project x to latent space
@@ -359,31 +371,31 @@ class MultiHeadLatentAttention(nn.Module):
             k_R = k_R.unsqueeze(1) # (B, 1, S, d_hr)
 
             # 3. populate KV Cache
-            if self.kv_len == 0:
-                self.kv_cache["c_KV"][:, :, :seq_len, :] = c_KV
-                self.kv_cache["k_R"][:, :, :seq_len, :] = k_R
+            if self.kv_cache_len == 0:
+                self.cache_c_KV[:, :, :seq_len, :] = c_KV
+                self.cache_k_R[:, :, :seq_len, :] = k_R
 
                 # Update current sequence length
-                self.kv_len = seq_len
+                self.kv_cache_len = seq_len
             else:
                 assert seq_len == 1, "You don't need to provide the whole input after prefill"
 
                 # 1) choose write position + update ring pointers
-                if self.kv_len < self.cntx:
-                    pos = self.kv_len # append at end
-                    self.kv_len += 1
+                if self.kv_cache_len < self.cntx:
+                    pos = self.kv_cache_len # append at end
+                    self.kv_cache_len += 1
                 else:
                     pos = self.start # overwrite oldest
                     self.start = (self.start + 1) % self.cntx
                 
                 # 2) write new K/V
-                self.kv_cache["c_KV"][:, :, pos:pos+1, :] = c_KV
-                self.kv_cache["k_R"][:, :, pos:pos+1, :] = k_R
+                self.cache_c_KV[:, :, pos:pos+1, :] = c_KV
+                self.cache_k_R[:, :, pos:pos+1, :] = k_R
 
                 # 3) read logical window (oldest -> newest)
-                idx = (self.start + torch.arange(self.kv_len, device=x.device)) % self.cntx
-                c_KV = self.kv_cache["c_KV"][:, :, idx, :]
-                k_R = self.kv_cache["k_R"][:, :, idx, :]
+                idx = (self.start + torch.arange(self.kv_cache_len, device=x.device)) % self.cntx
+                c_KV = self.cache_c_KV[:, :, idx, :]
+                k_R = self.cache_k_R[:, :, idx, :]
 
             # 4) apply RoPE to the logical window            
             if getattr(self, "rope", None) is not None and k_R.size(-1) > 0:
@@ -419,9 +431,9 @@ class MultiHeadLatentAttention(nn.Module):
 
     def forward(self, x: torch.Tensor, is_masked: bool = True):
         # calculate token positions
-        if hasattr(self, "kv_cache") and self.kv_len > 0:
+        if hasattr(self, "kv_cache_len") and self.kv_cache_len > 0:
             assert x.shape[-2] == 1, "You don't need to provide the whole input after prefill"
-            seq_len = min(self.cntx, self.kv_len + 1)
+            seq_len = min(self.cntx, self.kv_cache_len + 1)
             token_positions_q = torch.tensor([seq_len - 1], dtype=torch.long, device=x.device)
             token_positions_kv = torch.arange(seq_len, device=x.device)
         else:
@@ -442,7 +454,7 @@ class MultiHeadLatentAttention(nn.Module):
         scaled_mha = scaled_dot_product_attention(q, k, v_C, mask)
 
         # Project an output
-        if hasattr(self, "kv_cache"):
+        if hasattr(self, "kv_cache_len"):
             o = self.P_OV_absorbed(scaled_mha)
             o = einsum(o, "... h_q seq_len_q d_model -> ... seq_len_q d_model")
         else:
