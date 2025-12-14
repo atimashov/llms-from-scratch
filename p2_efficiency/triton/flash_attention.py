@@ -1,1 +1,111 @@
+import torch
 import triton
+from einops import rearrange, einsum
+
+from .utils import flashattn_fwd, flashattn_fwd_test
+
+class FlashAttention2(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, Q, K, V, is_causal=False):
+        """
+        We don't split over  dimension 'd' on tiles
+        """
+        # Aserts first
+        assert Q.shape[-1] == K.shape[-1], "'d' dimension mismatch"
+        assert K.shape[-2] == V.shape[-2], "Sequence dimension (for K, V) mismatch"
+        assert K.shape[-3] == V.shape[-3], "Number of heads (for K, V) mismatch"
+        assert Q.is_cuda and K.is_cuda and V.is_cuda, "Expected CUDA tensors"
+        assert Q.is_contiguous() and K.is_contiguous() and V.is_contiguous(), "Our pointer arithmetic will assume contiguous x"
+        # NOTE: temporary assert
+        assert Q.shape[-3] == K.shape[-3], "Currently only MHA is supported"
+        
+        # Get dimension
+        B, H, N_QUERIES, D_MODEL = Q.shape
+        _, _, N_KEYS, _ = K.shape
+
+        # Tiles and their sizes (Roughly 16 loops through the embedding dimension)
+        # M = 16 * 4 * d # TODO: size of SRAM, replace
+        # B_kv = ceil_div(M, 4 * d)
+        # B_q  = min(d, B_kv) # 128 # min(d, B_kv)
+
+        # T_q, T_kv = ceil_div(S_q, B_q), ceil_div(S_kv, B_kv)
+
+        # Initialize empty result tensor, logsumexps 
+        O = torch.zeros((B, H, N_QUERIES, D_MODEL), device = Q.device, dtype=torch.float32)
+        L = torch.zeros((B, H, N_QUERIES), device=Q.device, dtype=torch.float32) # TODO: modify dimensions (add H)
+
+        # Strides
+        stride_qb, stride_qh, stride_qs, stride_qd = Q.stride()
+        stride_kb, stride_kh, stride_ks, stride_kd = K.stride()
+        stride_vb, stride_vh, stride_vs, stride_vd = V.stride()
+        stride_ob, stride_oh, stride_os, stride_od = O.stride()
+        stride_lb, stride_lh, stride_ls = L.stride()
+        
+        # Tile sizes
+        ctx.Q_TILE_SIZE = max(triton.next_power_of_2(N_QUERIES) // 16, 16) # Roughly 16 loops through the embedding dimension
+        ctx.K_TILE_SIZE = max(triton.next_power_of_2(N_KEYS) // 16, 16) # Roughly 16 loops through the embedding dimension
+        
+        # Run kernel
+        scale = 1 / (D_MODEL ** 0.5)
+        grid = (B, H, triton.cdiv(N_QUERIES, ctx.Q_TILE_SIZE))
+        flashattn_fwd(
+            Q_ptr = Q, K_ptr = K, V_ptr = V, O_ptr = O, L_ptr = L,
+            stride_qb = stride_qb, stride_qh = stride_qh, stride_qs = stride_qs, stride_qd = stride_qd,
+            stride_kb = stride_kb, stride_kh = stride_kh, stride_ks = stride_ks, stride_kd = stride_kd,
+            stride_vb = stride_vb, stride_vh = stride_vh, stride_vs = stride_vs, stride_vd = stride_vd,
+            stride_ob = stride_ob, stride_oh = stride_oh, stride_os = stride_os, stride_od = stride_od,
+            stride_lb = stride_lb, stride_lh = stride_lh, stride_ls = stride_ls
+            N_QUERIES = N_QUERIES, N_KEYS = N_KEYS,
+            scale = scale,
+            D_MODEL = D_MODEL, Q_TILE_SIZE = ctx.Q_TILE_SIZE, K_TILE_SIZE = ctx.K_TILE_SIZE, is_causal = is_causal,
+        )
+
+        # Cache vars necessary for backward
+        ctx.save_for_backward(L, Q, K, V, O)
+        ctx.is_causal = is_causal
+        return O
+
+    @staticmethod
+    def backward(ctx, dO):
+        L, Q, K, V, O = ctx.saved_tensors
+        D = (O * dO).sum(axis = -1)
+
+        # Get dimension
+        B, N_QUERIES, D_MODEL = Q.shape
+        _, N_KEYS, _ = K.shape
+
+        # Get strides
+        stride_qb, stride_qh, stride_qs, stride_qd = Q.stride()
+        stride_kb, stride_kh, stride_ks, stride_kd = K.stride()
+        stride_vb, stride_vh, stride_vs, stride_vd = V.stride()
+        stride_ob, stride_oh, stride_os, stride_od = O.stride()
+        stride_lb, stride_lh, stride_ls = L.stride()
+
+        # Tile sizes and causality
+        B_q = ctx.Q_TILE_SIZE
+        B_kv = ctx.K_TILE_SIZE
+        is_causal = ctx.is_causal
+        
+        # Init outputs
+        dQ = torch.zeros_like(Q)
+        dK = torch.zeros_like(K)
+        dV = torch.zeros_like(V)
+
+        # Run kernel
+        scale = 1 / (D_MODEL ** 0.5)
+        grid = (B, H, triton.cdiv(N_QUERIES, ctx.Q_TILE_SIZE))
+        flashattn_bcwd[grid](
+            Q_ptr = Q, K_ptr = K, V_ptr = V, dQ_ptr = dQ, dK_ptr = dK, dV_ptr = dV,
+            O_ptr = O, dO_ptr = dO, L_ptr = L, D_ptr = D,
+            stride_qb = stride_qb, stride_qh = stride_qh, stride_qs = stride_qs, stride_qd = stride_qd,
+            stride_kb = stride_kb, stride_kh = stride_kh, stride_ks = stride_ks, stride_kd = stride_kd,
+            stride_vb = stride_vb, stride_vh = stride_vh, stride_vs = stride_vs, stride_vd = stride_vd,
+            stride_ob = stride_ob, stride_oh = stride_oh, stride_os = stride_os, stride_od = stride_od,
+            stride_lb = stride_lb, stride_lh = stride_lh, stride_ls = stride_ls
+            N_QUERIES = N_QUERIES, N_KEYS = N_KEYS,
+            scale = scale,
+            D_MODEL = D_MODEL, Q_TILE_SIZE = B_q, K_TILE_SIZE = B_kv,
+            is_causal = is_causal,
+        )
+
+        return dQ, dK, dV, None
