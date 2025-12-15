@@ -10,18 +10,17 @@ class FlashAttention2(torch.autograd.Function):
         """
         We don't split over  dimension 'd' on tiles
         """
-        # Aserts first
-        assert Q.shape[-1] == K.shape[-1], "'d' dimension mismatch"
-        assert K.shape[-2] == V.shape[-2], "Sequence dimension (for K, V) mismatch"
-        assert K.shape[-3] == V.shape[-3], "Number of heads (for K, V) mismatch"
-        assert Q.is_cuda and K.is_cuda and V.is_cuda, "Expected CUDA tensors"
-        assert Q.is_contiguous() and K.is_contiguous() and V.is_contiguous(), "Our pointer arithmetic will assume contiguous x"
-        # NOTE: temporary assert
-        assert Q.shape[-3] == K.shape[-3], "Currently only MHA is supported"
-        
         # Get dimension
         B, H, N_QUERIES, D_MODEL = Q.shape
-        _, _, N_KEYS, _ = K.shape
+        _, H_kv, N_KEYS, _ = K.shape
+
+        # Aserts first
+        assert D_MODEL == K.shape[-1], "'d' dimension mismatch"
+        assert N_KEYS == V.shape[-2], "Sequence dimension (for K, V) mismatch"
+        assert H_kv == V.shape[-3], "Number of heads (for K, V) mismatch"
+        assert H % H_kv == 0, "Number of Q heads should be divisible by number of KV heads
+        assert Q.is_cuda and K.is_cuda and V.is_cuda, "Expected CUDA tensors"
+        assert Q.is_contiguous() and K.is_contiguous() and V.is_contiguous(), "Our pointer arithmetic will assume contiguous x"
 
         # Tiles and their sizes (Roughly 16 loops through the embedding dimension)
         # M = 16 * 4 * d # TODO: size of SRAM, replace
@@ -54,8 +53,8 @@ class FlashAttention2(torch.autograd.Function):
             stride_kb = stride_kb, stride_kh = stride_kh, stride_ks = stride_ks, stride_kd = stride_kd,
             stride_vb = stride_vb, stride_vh = stride_vh, stride_vs = stride_vs, stride_vd = stride_vd,
             stride_ob = stride_ob, stride_oh = stride_oh, stride_os = stride_os, stride_od = stride_od,
-            stride_lb = stride_lb, stride_lh = stride_lh, stride_ls = stride_ls
-            N_QUERIES = N_QUERIES, N_KEYS = N_KEYS,
+            stride_lb = stride_lb, stride_lh = stride_lh, stride_ls = stride_ls,
+            N_QUERIES = N_QUERIES, N_KEYS = N_KEYS, N_HEADS = H, N_HEADS_KV = H_kv,
             scale = scale,
             D_MODEL = D_MODEL, Q_TILE_SIZE = ctx.Q_TILE_SIZE, K_TILE_SIZE = ctx.K_TILE_SIZE, is_causal = is_causal,
         )
@@ -71,8 +70,8 @@ class FlashAttention2(torch.autograd.Function):
         D = (O * dO).sum(axis = -1)
 
         # Get dimension
-        B, N_QUERIES, D_MODEL = Q.shape
-        _, N_KEYS, _ = K.shape
+        B, H, N_QUERIES, D_MODEL = Q.shape
+        _, H_kv, N_KEYS, _ = K.shape
 
         # Get strides
         stride_qb, stride_qh, stride_qs, stride_qd = Q.stride()
@@ -101,8 +100,8 @@ class FlashAttention2(torch.autograd.Function):
             stride_kb = stride_kb, stride_kh = stride_kh, stride_ks = stride_ks, stride_kd = stride_kd,
             stride_vb = stride_vb, stride_vh = stride_vh, stride_vs = stride_vs, stride_vd = stride_vd,
             stride_ob = stride_ob, stride_oh = stride_oh, stride_os = stride_os, stride_od = stride_od,
-            stride_lb = stride_lb, stride_lh = stride_lh, stride_ls = stride_ls
-            N_QUERIES = N_QUERIES, N_KEYS = N_KEYS,
+            stride_lb = stride_lb, stride_lh = stride_lh, stride_ls = stride_ls,
+            N_QUERIES = N_QUERIES, N_KEYS = N_KEYS, N_HEADS = H, N_HEADS_KV = H_kv,
             scale = scale,
             D_MODEL = D_MODEL, Q_TILE_SIZE = B_q, K_TILE_SIZE = B_kv,
             is_causal = is_causal,

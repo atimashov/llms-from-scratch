@@ -10,17 +10,17 @@ def flashattn_fwd(
     stride_vb, stride_vh, stride_vs, stride_vd,
     stride_ob, stride_oh, stride_os, stride_od,
     stride_lb, stride_lh, stride_ls,
-    N_QUERIES, N_KEYS,
+    N_QUERIES, N_KEYS, N_HEADS, N_HEADS_KV,
     scale,
     D_MODEL: tl.constexpr,
-    Q_TILE_SIZE: tl.constexpr,
-    K_TILE_SIZE: tl.constexpr,
+    Q_TILE_SIZE: tl.constexpr, K_TILE_SIZE: tl.constexpr,
     is_causal: tl.constexpr = False,
 ):
     # Program indices
     b_index = tl.program_id(0) # batch
     h_index = tl.program_id(1) # head
     q_index = tl.program_id(2) # tile id along sequence dimension for Q
+    GROUP_SIZE = N_HEADS // N_HEADS_KV
 
     # Create block pointers using corresponding offsets
     base_q = Q_ptr + b_index * stride_qb + h_index * stride_qh
@@ -32,7 +32,7 @@ def flashattn_fwd(
         block_shape=(Q_TILE_SIZE, D_MODEL),
         order=(1, 0),
     )
-    base_k = K_ptr + b_index * stride_kb + h_index * stride_kh
+    base_k = K_ptr + b_index * stride_kb + (h_index // GROUP_SIZE) * stride_kh
     K_block_ptr = tl.make_block_ptr(
         base_k,
         shape=(N_KEYS, D_MODEL),
@@ -41,7 +41,7 @@ def flashattn_fwd(
         block_shape=(K_TILE_SIZE, D_MODEL),
         order=(1, 0),
     )
-    base_v = V_ptr + b_index * stride_vb + h_index * stride_vh
+    base_v = V_ptr + b_index * stride_vb + (h_index // GROUP_SIZE) * stride_vh
     V_block_ptr = tl.make_block_ptr(
         base_v,
         shape=(N_KEYS, D_MODEL),
@@ -129,7 +129,7 @@ def flashattn_bcwd(
     stride_vb, stride_vh, stride_vs, stride_vd,
     stride_ob, stride_oh, stride_os, stride_od,
     stride_lb, stride_lh, stride_ls,
-    N_QUERIES, N_KEYS,
+    N_QUERIES, N_KEYS, N_HEADS, N_HEADS_KV,
     scale,
     D_MODEL: tl.constexpr,
     Q_TILE_SIZE: tl.constexpr,
@@ -140,6 +140,7 @@ def flashattn_bcwd(
     b_index = tl.program_id(0) # batch
     h_index = tl.program_id(1) # head
     q_index = tl.program_id(2) # tile id along sequence dimension for Q
+    GROUP_SIZE = N_HEADS // N_HEADS_KV
 
     # Create block pointers using corresponding offsets
     base_q = Q_ptr + b_index * stride_qb + h_index * stride_qh
@@ -160,7 +161,7 @@ def flashattn_bcwd(
         block_shape=(Q_TILE_SIZE, D_MODEL),
         order=(1, 0),
     )
-    base_k = K_ptr + b_index * stride_kb + h_index * stride_kh
+    base_k = K_ptr + b_index * stride_kb + (h_index // GROUP_SIZE) * stride_kh
     K_block_ptr = tl.make_block_ptr(
         base_k,
         shape=(N_KEYS, D_MODEL),
@@ -170,7 +171,7 @@ def flashattn_bcwd(
         order=(1, 0),
     )
     
-    base_v = V_ptr + b_index * stride_vb + h_index * stride_vh
+    base_v = V_ptr + b_index * stride_vb + (h_index // GROUP_SIZE)  * stride_vh
     V_block_ptr = tl.make_block_ptr(
         base_v,
         shape=(N_KEYS, D_MODEL),
@@ -218,14 +219,14 @@ def flashattn_bcwd(
     )
 
     # Pointers for K, V gradients (cannot use block pointers for atomic add)
-    base_dk = dK_ptr + b_index * stride_kb + h_index * stride_kh
-    base_dv = dV_ptr + b_index * stride_vb + h_index * stride_vh
+    base_dk = dK_ptr + b_index * stride_kb + (h_index // GROUP_SIZE)  * stride_kh
+    base_dv = dV_ptr + b_index * stride_vb + (h_index // GROUP_SIZE)  * stride_vh
 
-    base_k_ids = tl.arange(0, K_TILE_SIZE)   # (BK, 1) k_start + 
-    base_d_ids = tl.arange(0, D_MODEL)                      # (1, D_MODEL)
+    k_offsets = tl.arange(0, K_TILE_SIZE)   # (BK, 1) k_start + 
+    d_offsets = tl.arange(0, D_MODEL)                      # (1, D_MODEL)
 
-    dK_tile_ptrs = base_dk + base_k_ids[:, None] * stride_ks + base_d_ids[None, :] * stride_kd   # (BK, D_MODEL)
-    dV_tile_ptrs = base_dv + base_k_ids[:, None] * stride_vs + base_d_ids[None, :] * stride_vd
+    dK_tile_ptrs = base_dk + k_offsets[:, None] * stride_ks + d_offsets[None, :] * stride_kd   # (BK, D_MODEL)
+    dV_tile_ptrs = base_dv + k_offsets[:, None] * stride_vs + d_offsets[None, :] * stride_vd
 
     # Initialize buffers for dQ (NOTE: what about dtype?)
     dQ = tl.zeros((Q_TILE_SIZE, D_MODEL), dtype=tl.float32) # (Q_TILE_SIZE, D_MODEL)
@@ -250,7 +251,7 @@ def flashattn_bcwd(
         if is_causal:
             k_start = k_iter * K_TILE_SIZE
             q_ids = q_start + tl.arange(0, Q_TILE_SIZE)
-            k_ids = k_start + base_k_ids
+            k_ids = k_start + k_offsets
             mask = (q_ids[:, None] >= k_ids[None, :]) & (k_ids[None, :] < N_KEYS) & (q_ids[:, None] < N_QUERIES)
             S = tl.where(mask, S, S - 1e6)
 
@@ -269,7 +270,7 @@ def flashattn_bcwd(
         dK = tl.dot(tl.trans(dS), Q)
 
         # Atomically add output of the dK, dV to global memory 
-        mask_kd = (base_k_ids[:, None] + k_iter * K_TILE_SIZE< N_KEYS) # - k_iter * K_TILE_SIZE)  # (BK,1) broadcastable to (BK, D_MODEL)
+        mask_kd = (k_offsets[:, None] + k_iter * K_TILE_SIZE< N_KEYS) # - k_iter * K_TILE_SIZE)  # (BK,1) broadcastable to (BK, D_MODEL)
         tl.atomic_add(dK_tile_ptrs, dK.to(tl.float32), mask=mask_kd)
         tl.atomic_add(dV_tile_ptrs, dV.to(tl.float32), mask=mask_kd)
 
