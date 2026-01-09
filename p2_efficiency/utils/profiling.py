@@ -11,7 +11,7 @@ from timeit import default_timer as timer
 from datetime import datetime
 import p1_core.layers.attention
 from p2_efficiency.annotated import AnnotatedTransformerLM as TransformerLM
-from p2_efficiency.annotated import annotated_scaled_dot_product_attention
+from p2_efficiency.annotated import annotated_scaled_dot_product_attention, flash_attention
 from p1_core.utils import cross_entropy
 import torch.cuda.nvtx as nvtx
 from torch.amp import autocast, GradScaler
@@ -88,14 +88,20 @@ def benchmark_llm(
 
 @nvtx.range("profile llm")
 def profile_llm(
-    d_model, d_ff, num_layers, num_heads, context_length = 256, mode = "forward", 
+    d_model, d_ff, num_layers, num_heads, context_length = 256, attn_type = "default", mode = "forward", 
     is_amp = False, autocast_dtype = None, profile_iters = 100
 ):
     assert mode in {"forward", "forward+backward"}, f"Unsupported mode: {mode}"
     assert torch.cuda.is_available(), "GPU is not available"
     
     # Replace to annotated attention
-    p1_core.layers.attention.scaled_dot_product_attention = annotated_scaled_dot_product_attention
+    if attn_type == "default":
+        p1_core.layers.attention.scaled_dot_product_attention = annotated_scaled_dot_product_attention
+    elif attn_type == "flash":
+        p1_core.layers.attention.scaled_dot_product_attention = flash_attention
+    elif attn_type == "compiled default":
+        # NOTE: there are different modes of compile
+        p1_core.layers.attention.scaled_dot_product_attention = torch.compile(annotated_scaled_dot_product_attention)
     
     # Init default params
     batch_size = 4

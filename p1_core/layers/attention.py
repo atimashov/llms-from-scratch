@@ -6,7 +6,7 @@ from .pos_enc import RoPE
 from .core import Linear
 from p1_core.utils import softmax
 
-def scaled_dot_product_attention(Q: torch.Tensor, K: torch.Tensor, V: torch.Tensor, mask: torch.Tensor | None):
+def scaled_dot_product_attention(Q: torch.Tensor, K: torch.Tensor, V: torch.Tensor, is_causal: bool = True):
     """
     Q:  (batch_size, ..., seq_len_q, d_qk) # seq_len_q = 1 for KV Cache
     K:  (batch_size, ..., seq_len_kv, d_qk)
@@ -26,7 +26,12 @@ def scaled_dot_product_attention(Q: torch.Tensor, K: torch.Tensor, V: torch.Tens
     scores = scores.clamp(min = -80, max=80.0) # NOTE: might be better after rescaling
     
     # Compute masking
-    if mask is not None:
+    if is_causal:
+        seq_q, seq_kv = scores.shape[-2:]
+        assert seq_q <= seq_kv, f"causal assumes S_Q <= S_K, got S_Q = {seq_q}, S_K = {seq_kv}"
+        token_pos_kv = torch.arange(seq_kv, device = scores.device)
+        token_pos_q = torch.arange(seq_kv - seq_q, seq_kv, device = scores.device)
+        mask = token_pos_q[:, None] >= token_pos_kv[None, :]
         scores = scores.masked_fill(~mask, float('-inf'))
     
     # Compute weights
@@ -34,6 +39,7 @@ def scaled_dot_product_attention(Q: torch.Tensor, K: torch.Tensor, V: torch.Tens
     
     # Compute attention
     attn = einsum(weights, V, "... seq_len_q seq_len_kv, ... seq_len_kv d_v -> ... seq_len_q d_v")
+    
     # Rearrange GQA to (B, H, S, d_h)
     if H_q > H_kv and H_kv > 1: # GQA
         attn = rearrange(attn, "... h_kv r seq_len_q d_h -> ... (h_kv r) seq_len_q d_h")
@@ -175,7 +181,7 @@ class MultiHeadSelfAttention(nn.Module):
         
         return k, v
 
-    def forward(self, x: torch.Tensor, is_masked: bool = True, with_rope = True, kv_cache = False):
+    def forward(self, x: torch.Tensor, is_causal: bool = True, with_rope = True):
         # Calculate token positions
         if hasattr(self, "kv_cache_len") and self.kv_cache_len > 0:
             assert x.shape[-2] == 1, "You don't need to provide the whole input after prefill"
@@ -190,14 +196,8 @@ class MultiHeadSelfAttention(nn.Module):
         q = self.get_proj_q(x, with_rope, token_positions_q)  # batch_size x h x seq_len x d_qk  or batch_size x 1 x d_qk (KV cache)
         k, v = self.get_proj_kv(x, with_rope, token_positions_kv)  # batch_size x h x seq_len x d_qk
 
-        # Create mask
-        if is_masked:
-            mask = token_positions_q[:, None] >= token_positions_kv[None, :]
-        else:
-            mask = None
-
         # Calculate scaled MHA
-        scaled_mha = scaled_dot_product_attention(q, k, v, mask)
+        scaled_mha = scaled_dot_product_attention(q, k, v, is_causal = is_causal)
         scaled_mha = rearrange(scaled_mha, "... h_q seq_len_q d_v -> ... seq_len_q (h_q d_v)")
         
         # Project an output
@@ -429,7 +429,7 @@ class MultiHeadLatentAttention(nn.Module):
             v_C = rearrange(v_C, "... seq_len (h d_h) -> ... h seq_len d_h", h = self.num_heads) # (B, H, S, d_h)
         return k, v_C
 
-    def forward(self, x: torch.Tensor, is_masked: bool = True):
+    def forward(self, x: torch.Tensor, is_causal: bool = True):
         # calculate token positions
         if hasattr(self, "kv_cache_len") and self.kv_cache_len > 0:
             assert x.shape[-2] == 1, "You don't need to provide the whole input after prefill"
@@ -444,12 +444,6 @@ class MultiHeadLatentAttention(nn.Module):
         q = self.get_proj_q(x, token_positions_q)  # batch_size x h x seq_len x d_qk
         k, v_C = self.get_proj_kv(x, token_positions_kv)  # batch_size x h x seq_len x d_qk
 
-        # Create mask
-        if is_masked:
-            mask = token_positions_q[:, None] >= token_positions_kv[None, :]
-        else:
-            mask = None        
-        
         # Calculate scaled MHA
         scaled_mha = scaled_dot_product_attention(q, k, v_C, mask)
 

@@ -1,0 +1,10 @@
+d_model: 768
+d_ff: 3072
+num_layers: 12
+num_heads: 12
+context_length: 128 
+attn_type: compiled default
+mode: forward+backward
+is_amp: true
+autocast_dtype: bfloat16
+profile_iters: 100

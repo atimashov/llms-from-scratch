@@ -22,6 +22,7 @@ dependencies = [
     "tensorboard==2.19.0",
     "termcolor==3.1.0",
     "torch==2.8.0",
+    "triton",
     "tqdm==4.67.1",
     "wandb>=0.22.0",
 ]

@@ -323,5 +323,4 @@ if __name__ == '__main__':
     with open(inputs.config, 'r') as stream:
         config = yaml.safe_load(stream)
 
-
     main(config, inputs.seed)

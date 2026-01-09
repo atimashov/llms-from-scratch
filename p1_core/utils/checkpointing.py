@@ -40,7 +40,7 @@ def load_checkpoint(src, model, optimizer = None, scaler = None, device = "cpu",
         obj["model"] = remap_state_dict(obj["model"])
 
     # Strip known wrappers
-    # obj["model"] = _sanitize_state_dict(obj["model"])
+    obj["model"] = _sanitize_state_dict(obj["model"])
 
     # Load model weights
     model.load_state_dict(obj["model"])

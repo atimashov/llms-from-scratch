@@ -259,20 +259,26 @@ def flashattn_bcwd(
         P = tl.exp(S.to(tl.float32) - L[:, None])
 
         # Compute dV
-        dV = tl.dot(tl.trans(P), dO)
+        dV = tl.dot(tl.trans(P), dO.to(tl.float32))
 
         # Compute dP and dS
-        dP = tl.dot(dO, tl.trans(V))
+        # dP = tl.dot(dO, tl.trans(V))
+        dP = tl.dot(dO.to(tl.float32), tl.trans(V).to(tl.float32))
+
         dS = P * (dP - D[:, None]) * scale
 
         # Compute dQ, dK
-        dQ += tl.dot(dS, K)
-        dK = tl.dot(tl.trans(dS), Q)
+        # dQ += tl.dot(dS, K)
+        dQ += tl.dot(dS, K.to(tl.float32))
+        # dK = tl.dot(tl.trans(dS), Q)
+        dK = tl.dot(tl.trans(dS), Q.to(tl.float32))
 
         # Atomically add output of the dK, dV to global memory 
         mask_kd = (k_offsets[:, None] + k_iter * K_TILE_SIZE< N_KEYS) # - k_iter * K_TILE_SIZE)  # (BK,1) broadcastable to (BK, D_MODEL)
-        tl.atomic_add(dK_tile_ptrs, dK.to(tl.float32), mask=mask_kd)
-        tl.atomic_add(dV_tile_ptrs, dV.to(tl.float32), mask=mask_kd)
+        # tl.atomic_add(dK_tile_ptrs, dK.to(tl.float32), mask=mask_kd)
+        tl.atomic_add(dK_tile_ptrs, dK.to(tl.bfloat16), mask=mask_kd)
+        # tl.atomic_add(dV_tile_ptrs, dV.to(tl.float32), mask=mask_kd)
+        tl.atomic_add(dV_tile_ptrs, dV.to(tl.bfloat16), mask=mask_kd)
 
         # Move the pointers to the next tile.
         K_block_ptr = K_block_ptr.advance((K_TILE_SIZE, 0)) # (K_TILE_SIZE, D_MODEL)

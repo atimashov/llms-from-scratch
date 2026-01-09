@@ -2,7 +2,7 @@ import torch
 import triton
 from einops import rearrange, einsum
 
-from .utils import flashattn_fwd, flashattn_fwd_test
+from p2_efficiency.triton.utils import flashattn_fwd, flashattn_bcwd
 
 class FlashAttention2(torch.autograd.Function):
     @staticmethod
@@ -18,7 +18,7 @@ class FlashAttention2(torch.autograd.Function):
         assert D_MODEL == K.shape[-1], "'d' dimension mismatch"
         assert N_KEYS == V.shape[-2], "Sequence dimension (for K, V) mismatch"
         assert H_kv == V.shape[-3], "Number of heads (for K, V) mismatch"
-        assert H % H_kv == 0, "Number of Q heads should be divisible by number of KV heads
+        assert H % H_kv == 0, "Number of Q heads should be divisible by number of KV heads"
         assert Q.is_cuda and K.is_cuda and V.is_cuda, "Expected CUDA tensors"
         assert Q.is_contiguous() and K.is_contiguous() and V.is_contiguous(), "Our pointer arithmetic will assume contiguous x"
 
@@ -30,7 +30,7 @@ class FlashAttention2(torch.autograd.Function):
         # T_q, T_kv = ceil_div(S_q, B_q), ceil_div(S_kv, B_kv)
 
         # Initialize empty result tensor, logsumexps 
-        O = torch.zeros((B, H, N_QUERIES, D_MODEL), device = Q.device, dtype=torch.float32)
+        O = torch.zeros((B, H, N_QUERIES, D_MODEL), device = Q.device, dtype=Q.dtype) # torch.float32)
         L = torch.zeros((B, H, N_QUERIES), device=Q.device, dtype=torch.float32) # TODO: modify dimensions (add H)
 
         # Strides
@@ -47,7 +47,7 @@ class FlashAttention2(torch.autograd.Function):
         # Run kernel
         scale = 1 / (D_MODEL ** 0.5)
         grid = (B, H, triton.cdiv(N_QUERIES, ctx.Q_TILE_SIZE))
-        flashattn_fwd(
+        flashattn_fwd[grid](
             Q_ptr = Q, K_ptr = K, V_ptr = V, O_ptr = O, L_ptr = L,
             stride_qb = stride_qb, stride_qh = stride_qh, stride_qs = stride_qs, stride_qd = stride_qd,
             stride_kb = stride_kb, stride_kh = stride_kh, stride_ks = stride_ks, stride_kd = stride_kd,

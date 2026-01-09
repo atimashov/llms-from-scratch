@@ -1183,6 +1183,7 @@ dependencies = [
     { name = "termcolor" },
     { name = "torch" },
     { name = "tqdm" },
+    { name = "triton" },
     { name = "wandb" },
 ]
 
@@ -1206,6 +1207,7 @@ requires-dist = [
     { name = "termcolor", specifier = "==3.1.0" },
     { name = "torch", specifier = "==2.8.0" },
     { name = "tqdm", specifier = "==4.67.1" },
+    { name = "triton" },
     { name = "wandb", specifier = ">=0.22.0" },
 ]
 
@@ -2847,7 +2849,7 @@ name = "triton"
 version = "3.4.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "setuptools", marker = "sys_platform == 'linux'" },
+    { name = "setuptools" },
 ]
 wheels = [
     { url = "https://files.pythonhosted.org/packages/d0/66/b1eb52839f563623d185f0927eb3530ee4d5ffe9d377cdaf5346b306689e/triton-3.4.0-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:31c1d84a5c0ec2c0f8e8a072d7fd150cab84a9c239eaddc6706c081bfae4eb04", size = 155560068, upload-time = "2025-07-30T19:58:37.081Z" },
