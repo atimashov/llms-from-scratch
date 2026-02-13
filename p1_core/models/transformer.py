@@ -126,9 +126,3 @@ class TransformerLM(nn.Module):
             return logits
         probs = softmax(logits, dim= -1, tau = tau)
         return probs
-
-
-
-
-
-
