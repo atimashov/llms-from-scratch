@@ -1,0 +1,1 @@
+uv run python -m pytest p2_efficiency/tests/test_flashattn2.py

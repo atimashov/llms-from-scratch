@@ -1,0 +1,27 @@
+meta:
+  seed: 123
+  device: cuda:0
+  dtype: float16
+
+run: 
+  mode: fwd_bcwd # fwd | fwd_bcwd
+  iters_warmup: 20
+  iters_profile: 100
+  implementations:      # what to profile (currenly NOT in use)
+    - naive
+    - compiled
+    - flash
+
+sweep:
+  is_causal: true
+  model_params: # batch_size, context length, d_model, num_heads, num_heads_KV
+    - [512, 512, 128, 8, 8]
+    - [256, 1024, 128, 8, 8]
+    # - [256, 512, 256, 16, 16]
+    # - [256, 512, 128, 8, 8]
+  gpu_params: # q_tile, k_tile, num_warps, num_staes
+    - [32, 64, 4, 2]
+    - [64, 32, 4, 2]
+    - [64, 64, 4, 2]
+    - [64, 64, 8, 1]
+    - [64, 64, 4, 1]

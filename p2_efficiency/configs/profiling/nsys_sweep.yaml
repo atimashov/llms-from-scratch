@@ -1,0 +1,29 @@
+meta:
+  script_module: p2_efficiency.scripts.python.run_nsys_profiler
+  trace: cuda,nvtx,osrt
+
+run:
+  mode: fwd_bcwd
+  amp:
+    enabled: true
+    autocast_dtype: bfloat16
+
+sweep:
+  batch_size: [64]
+  context_lengths: [128, 256, 512, 1024]
+  attn_types: ["naive", "compiled", "flash"]
+  models: # num_layers, d_model, d_ff, num_heads
+    - [12, 768, 3072, 12]
+    - [24, 1024, 4096, 16]
+    - [36, 1280, 5120, 20]
+    - [48, 1600, 6400, 25]
+    - [32, 2560, 10240, 32]
+  gpu_params: # q_tile, k_tile, num_warps, num_staes
+    - [32, 64, 4, 2]
+    - [64, 32, 4, 2]
+    - [64, 64, 4, 2]
+    - [64, 64, 8, 1]
+    - [64, 64, 4, 1]
+
+outputs:
+  root: p2_efficiency/outputs/nsys_profiler

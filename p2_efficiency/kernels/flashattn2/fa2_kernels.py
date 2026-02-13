@@ -32,6 +32,10 @@ def flashattn_fwd(
         block_shape=(Q_TILE_SIZE, D_MODEL),
         order=(1, 0),
     )
+
+    h_kv = h_index // GROUP_SIZE
+    tl.device_assert(h_kv < N_HEADS_KV)
+
     base_k = K_ptr + b_index * stride_kb + (h_index // GROUP_SIZE) * stride_kh
     K_block_ptr = tl.make_block_ptr(
         base_k,
@@ -86,13 +90,16 @@ def flashattn_fwd(
         # Compute scaled tile score
         S = tl.dot(Q, tl.trans(K)) * scale # (Q_TILE_SIZE, K_TILE_SIZE)
 
-        # Apply causal mask
+        # Apply boundaries and (if required) causal mask
+        k_start = k_iter * K_TILE_SIZE
+        q_ids = q_start + tl.arange(0, Q_TILE_SIZE)          # (BQ,)
+        k_ids = k_start + tl.arange(0, K_TILE_SIZE)          # (BK,)
+
+        valid = (k_ids[None, :] < N_KEYS) & (q_ids[:, None] < N_QUERIES)
         if is_causal:
-            k_start = k_iter * K_TILE_SIZE
-            q_ids = q_start + tl.arange(0, Q_TILE_SIZE)
-            k_ids = k_start + tl.arange(0, K_TILE_SIZE)
-            mask = (q_ids[:, None] >= k_ids[None, :]) & (k_ids[None, :] < N_KEYS) & (q_ids[:, None] < N_QUERIES)
-            S = tl.where(mask, S, S - 1e6)
+            valid = valid & (q_ids[:, None] >= k_ids[None, :])
+
+        S = tl.where(valid, S, float("-inf"))
 
         # Compute temporary running features
         m_hat = S.max(axis = -1) # (Q_TILE_SIZE, )
@@ -123,11 +130,12 @@ def flashattn_fwd(
 @triton.jit
 def flashattn_bcwd(
     Q_ptr, K_ptr, V_ptr, dQ_ptr, dK_ptr, dV_ptr,
-    O_ptr, dO_ptr, L_ptr, D_ptr,
+    O_ptr, dO_ptr, L_ptr,
     stride_qb, stride_qh, stride_qs, stride_qd,
     stride_kb, stride_kh, stride_ks, stride_kd,
     stride_vb, stride_vh, stride_vs, stride_vd,
     stride_ob, stride_oh, stride_os, stride_od,
+    stride_dob, stride_doh, stride_dos, stride_dod,
     stride_lb, stride_lh, stride_ls,
     N_QUERIES, N_KEYS, N_HEADS, N_HEADS_KV,
     scale,
@@ -190,23 +198,14 @@ def flashattn_bcwd(
         block_shape=(Q_TILE_SIZE, D_MODEL),
         order=(1, 0),
     )
-    base_do = dO_ptr + b_index * stride_ob + h_index * stride_oh
+    base_do = dO_ptr + b_index * stride_dob + h_index * stride_doh
     dO_block_ptr = tl.make_block_ptr(
         base_do,
         shape=(N_QUERIES, D_MODEL),
-        strides=(stride_os, stride_od),
+        strides=(stride_dos, stride_dod),
         offsets=(q_index * Q_TILE_SIZE, 0),
         block_shape=(Q_TILE_SIZE, D_MODEL),
         order=(1, 0),
-    )
-    base_d = D_ptr + b_index * stride_lb + h_index * stride_lh
-    D_block_ptr = tl.make_block_ptr(
-        base_d,
-        shape=(N_QUERIES,),
-        strides=(stride_ls, ),
-        offsets=(q_index * Q_TILE_SIZE, ),
-        block_shape=(Q_TILE_SIZE, ),
-        order=(0,),
     )
     base_l = L_ptr + b_index * stride_lb + h_index * stride_lh
     L_block_ptr = tl.make_block_ptr(
@@ -228,16 +227,18 @@ def flashattn_bcwd(
     dK_tile_ptrs = base_dk + k_offsets[:, None] * stride_ks + d_offsets[None, :] * stride_kd   # (BK, D_MODEL)
     dV_tile_ptrs = base_dv + k_offsets[:, None] * stride_vs + d_offsets[None, :] * stride_vd
 
-    # Initialize buffers for dQ (NOTE: what about dtype?)
-    dQ = tl.zeros((Q_TILE_SIZE, D_MODEL), dtype=tl.float32) # (Q_TILE_SIZE, D_MODEL)
-    
     # Load the current tile of Q, O, dO, and L
     Q = tl.load(Q_block_ptr, boundary_check=(0, 1), padding_option="zero") # (Q_TILE_SIZE, D_MODEL)
     O = tl.load(O_block_ptr, boundary_check=(0, 1), padding_option="zero") # (Q_TILE_SIZE, D_MODEL)
     dO = tl.load(dO_block_ptr, boundary_check=(0, 1), padding_option="zero") # (Q_TILE_SIZE, D_MODEL)
-    D = tl.load(D_block_ptr, boundary_check=(0,), padding_option="zero") # (Q_TILE_SIZE,)
     L = tl.load(L_block_ptr, boundary_check=(0,), padding_option="zero") # (Q_TILE_SIZE,)
 
+    # Calculate D for the current tile of O/dO (Q)
+    D = tl.sum(O * dO, axis = -1)
+    
+    # Initialize buffers for dQ (to accumulate if float32)
+    dQ = tl.zeros((Q_TILE_SIZE, D_MODEL), dtype=tl.float32) # (Q_TILE_SIZE, D_MODEL)
+    
     q_start = q_index * Q_TILE_SIZE
     for k_iter in range(tl.cdiv(N_KEYS, K_TILE_SIZE)):
         # Load the current tiles of K, V
@@ -247,38 +248,35 @@ def flashattn_bcwd(
         # Re-Compute scaled tile score
         S = tl.dot(Q, tl.trans(K)) * scale # (Q_TILE_SIZE, K_TILE_SIZE)
 
-        # Apply causal mask
+        # Apply boundaries and (if required) causal mask
+        k_start = k_iter * K_TILE_SIZE
+        q_ids = q_start + tl.arange(0, Q_TILE_SIZE)
+        k_ids = k_start + k_offsets                          # you already have k_offsets = tl.arange(0, BK)
+
+        valid = (k_ids[None, :] < N_KEYS) & (q_ids[:, None] < N_QUERIES)
         if is_causal:
-            k_start = k_iter * K_TILE_SIZE
-            q_ids = q_start + tl.arange(0, Q_TILE_SIZE)
-            k_ids = k_start + k_offsets
-            mask = (q_ids[:, None] >= k_ids[None, :]) & (k_ids[None, :] < N_KEYS) & (q_ids[:, None] < N_QUERIES)
-            S = tl.where(mask, S, S - 1e6)
+            valid = valid & (q_ids[:, None] >= k_ids[None, :])
+
+        S = tl.where(valid, S, float("-inf"))
 
         # Compute exponents of scores
-        P = tl.exp(S.to(tl.float32) - L[:, None])
+        P = tl.exp(S.to(tl.float32) - L[:, None]) # NOTE: do I need this .to(tl.float32)?
 
         # Compute dV
-        dV = tl.dot(tl.trans(P), dO.to(tl.float32))
+        dV = tl.dot(tl.trans(P).to(dO.dtype), dO)
 
         # Compute dP and dS
-        # dP = tl.dot(dO, tl.trans(V))
-        dP = tl.dot(dO.to(tl.float32), tl.trans(V).to(tl.float32))
-
-        dS = P * (dP - D[:, None]) * scale
+        dP = tl.dot(dO, tl.trans(V))
+        dS = P * (dP - D[:, None]) #  * scale
 
         # Compute dQ, dK
-        # dQ += tl.dot(dS, K)
-        dQ += tl.dot(dS, K.to(tl.float32))
-        # dK = tl.dot(tl.trans(dS), Q)
-        dK = tl.dot(tl.trans(dS), Q.to(tl.float32))
+        dQ += tl.dot(dS.to(K.dtype), K) * scale # NOTE: does scale fuck up everything?
+        dK = tl.dot(tl.trans(dS).to(Q.dtype), Q) * scale
 
         # Atomically add output of the dK, dV to global memory 
-        mask_kd = (k_offsets[:, None] + k_iter * K_TILE_SIZE< N_KEYS) # - k_iter * K_TILE_SIZE)  # (BK,1) broadcastable to (BK, D_MODEL)
-        # tl.atomic_add(dK_tile_ptrs, dK.to(tl.float32), mask=mask_kd)
-        tl.atomic_add(dK_tile_ptrs, dK.to(tl.bfloat16), mask=mask_kd)
-        # tl.atomic_add(dV_tile_ptrs, dV.to(tl.float32), mask=mask_kd)
-        tl.atomic_add(dV_tile_ptrs, dV.to(tl.bfloat16), mask=mask_kd)
+        mask_kd = (k_offsets[:, None] + k_iter * K_TILE_SIZE < N_KEYS) # - k_iter * K_TILE_SIZE)  # (BK,1) broadcastable to (BK, D_MODEL)
+        tl.atomic_add(dK_tile_ptrs, dK, mask=mask_kd)
+        tl.atomic_add(dV_tile_ptrs, dV, mask=mask_kd)
 
         # Move the pointers to the next tile.
         K_block_ptr = K_block_ptr.advance((K_TILE_SIZE, 0)) # (K_TILE_SIZE, D_MODEL)

@@ -7,13 +7,13 @@ from einops import einsum
 import torch
 import torch.cuda.nvtx as nvtx
 from p1_core.utils import softmax
-from p2_efficiency.triton.flash_attention import FlashAttention2
+from p2_efficiency.kernels.flashattn2 import FlashAttention2
 
 
 @nvtx.range("flash attention 2")
-def flash_attention(Q, K, V, is_causal: bool = True):
+def flash_attention(Q, K, V, is_causal: bool = True, q_tile=64, k_tile=64, num_warps=4, num_stages=1):
     Q, K, V = Q.contiguous(), K.contiguous(), V.contiguous()
-    return FlashAttention2.apply(Q, K, V, is_causal)
+    return FlashAttention2.apply(Q, K, V, is_causal, q_tile, k_tile, num_warps, num_stages)
 
 @nvtx.range("scaled dot product attention")
 def annotated_scaled_dot_product_attention(Q: torch.Tensor, K: torch.Tensor, V: torch.Tensor, is_causal: bool = True):
