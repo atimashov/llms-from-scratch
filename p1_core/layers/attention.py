@@ -16,7 +16,7 @@ def get_causal_mask(seq_q: int, seq_kv: int, device):
     return _MASK_CACHE[(seq_q, seq_kv)]
 
 
-def scaled_dot_product_attention(Q: torch.Tensor, K: torch.Tensor, V: torch.Tensor, is_causal: bool = True):
+def scaled_dot_product_attention(Q: torch.Tensor, K: torch.Tensor, V: torch.Tensor, is_causal: bool = True, pt_softmax: bool = False):
     """
     Q:  (batch_size, ..., seq_len_q, d_qk) # seq_len_q = 1 for KV Cache
     K:  (batch_size, ..., seq_len_kv, d_qk)
@@ -39,14 +39,12 @@ def scaled_dot_product_attention(Q: torch.Tensor, K: torch.Tensor, V: torch.Tens
     if is_causal:
         seq_q, seq_kv = scores.shape[-2:]
         assert seq_q <= seq_kv, f"causal assumes S_Q <= S_K, got S_Q = {seq_q}, S_K = {seq_kv}"
-        # token_pos_kv = torch.arange(seq_kv, device = scores.device)
-        # token_pos_q = torch.arange(seq_kv - seq_q, seq_kv, device = scores.device)
-        # mask = token_pos_q[:, None] >= token_pos_kv[None, :]
         mask = get_causal_mask(seq_q, seq_kv, scores.device)
         scores = scores.masked_fill(~mask, float('-inf'))
     
     # Compute weights
-    weights = softmax(scores, dim = -1)
+    fn_softmax = torch.softmax if pt_softmax else softmax # this makes 0.5x for latency
+    weights = fn_softmax(scores, dim = -1)
     
     # Compute attention
     attn = einsum(weights, V, "... seq_len_q seq_len_kv, ... seq_len_kv d_v -> ... seq_len_q d_v")
