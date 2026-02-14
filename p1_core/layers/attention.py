@@ -6,6 +6,16 @@ from .pos_enc import RoPE
 from .core import Linear
 from p1_core.utils import softmax
 
+_MASK_CACHE = {}
+
+def get_causal_mask(seq_q: int, seq_kv: int, device):
+    if (seq_q, seq_kv) not in _MASK_CACHE:
+        token_pos_kv = torch.arange(seq_kv, device = device)
+        token_pos_q = torch.arange(seq_kv - seq_q, seq_kv, device = device)
+        _MASK_CACHE[(seq_q, seq_kv)] = token_pos_q[:, None] >= token_pos_kv[None, :]
+    return _MASK_CACHE[(seq_q, seq_kv)]
+
+
 def scaled_dot_product_attention(Q: torch.Tensor, K: torch.Tensor, V: torch.Tensor, is_causal: bool = True):
     """
     Q:  (batch_size, ..., seq_len_q, d_qk) # seq_len_q = 1 for KV Cache
@@ -22,20 +32,21 @@ def scaled_dot_product_attention(Q: torch.Tensor, K: torch.Tensor, V: torch.Tens
         V = rearrange(V, "... h_kv seq_len_kv d_v -> ... h_kv 1 seq_len_kv d_v")
     
     # Compute scores
-    scores = einsum(Q, K, "... seq_len_q d_qk, ... seq_len_kv d_qk -> ... seq_len_q seq_len_kv")
-    scores = scores.clamp(min = -80, max=80.0) # NOTE: might be better after rescaling
+    scores = einsum(Q, K, "... seq_len_q d_qk, ... seq_len_kv d_qk -> ... seq_len_q seq_len_kv") / (d_qk ** 0.5)
+    # scores = scores.clamp(min = -80, max=80.0)
     
     # Compute masking
     if is_causal:
         seq_q, seq_kv = scores.shape[-2:]
         assert seq_q <= seq_kv, f"causal assumes S_Q <= S_K, got S_Q = {seq_q}, S_K = {seq_kv}"
-        token_pos_kv = torch.arange(seq_kv, device = scores.device)
-        token_pos_q = torch.arange(seq_kv - seq_q, seq_kv, device = scores.device)
-        mask = token_pos_q[:, None] >= token_pos_kv[None, :]
+        # token_pos_kv = torch.arange(seq_kv, device = scores.device)
+        # token_pos_q = torch.arange(seq_kv - seq_q, seq_kv, device = scores.device)
+        # mask = token_pos_q[:, None] >= token_pos_kv[None, :]
+        mask = get_causal_mask(seq_q, seq_kv, scores.device)
         scores = scores.masked_fill(~mask, float('-inf'))
     
     # Compute weights
-    weights = softmax(scores / (d_qk ** 0.5), dim = -1)
+    weights = softmax(scores, dim = -1)
     
     # Compute attention
     attn = einsum(weights, V, "... seq_len_q seq_len_kv, ... seq_len_kv d_v -> ... seq_len_q d_v")
